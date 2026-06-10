@@ -3,20 +3,51 @@
 // ADR 0001: Capture all monitors first on hotkey press, then let the user select on the frozen image
 
 use std::collections::HashMap;
-use std::fs;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, EventTarget, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindowBuilder,
+};
 use xcap::image::imageops;
-use xcap::image::RgbaImage;
+use xcap::image::{ImageFormat, RgbaImage};
 use xcap::Monitor;
 
 use crate::history;
 
 type AnyError = Box<dyn std::error::Error>;
+
+/// キャプチャモード / Capture mode
+#[derive(Clone, Copy, PartialEq)]
+pub enum CaptureMode {
+    Region,
+    Window,
+}
+
+impl CaptureMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            CaptureMode::Region => "region",
+            CaptureMode::Window => "window",
+        }
+    }
+}
+
+/// ウィンドウピッカー用の候補（座標はモニターローカルの物理ピクセル、最前面が先頭）
+/// Pickable window candidate (monitor-local physical px, topmost first)
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PickableWindow {
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
 
 /// オーバーレイ表示に必要なモニター情報（座標・サイズは物理ピクセル）
 /// Monitor info for the overlay (coordinates/sizes in physical pixels)
@@ -29,13 +60,16 @@ pub struct OverlayInfo {
     pub width: u32,
     pub height: u32,
     pub scale: f32,
-    pub image_path: String,
+    pub mode: String,
+    pub windows: Vec<PickableWindow>,
 }
 
-/// 凍結フレーム1枚分 / One frozen frame
+/// 凍結フレーム1枚分。bmpはオーバーレイ表示用（無圧縮・freeze://で配信）
+/// One frozen frame. `bmp` is served uncompressed to the overlay via freeze://
 pub struct Frame {
     pub info: OverlayInfo,
     pub image: RgbaImage,
+    pub bmp: Vec<u8>,
 }
 
 /// アクティブなキャプチャセッション（空 = セッションなし）
@@ -56,95 +90,248 @@ fn restore_main_if_needed(app: &AppHandle) {
     }
 }
 
-/// 領域選択キャプチャを開始する / Start a region-selection capture
-pub fn start_region_capture(app: &AppHandle) {
+/// オーバーレイ式キャプチャ（矩形/ウィンドウ）を開始する
+/// Start an overlay-based capture (region / window picking)
+pub fn start_overlay_capture(app: &AppHandle, mode: CaptureMode) {
     let app = app.clone();
-    // 撮影とPNG書き出しはメインスレッドを塞がないよう別スレッドで行う
-    // Capture and PNG encoding run off the main thread to keep the UI responsive
+    // 撮影とBMPエンコードはメインスレッドを塞がないよう別スレッドで行う
+    // Capture and BMP encoding run off the main thread to keep the UI responsive
     std::thread::spawn(move || {
-        if let Err(e) = begin_session(&app) {
-            eprintln!("[auracap] region capture failed: {e}");
+        if let Err(e) = begin_session(&app, mode) {
+            eprintln!("[auracap] overlay capture failed: {e}");
             end_session(&app);
         }
     });
 }
 
-fn begin_session(app: &AppHandle) -> Result<(), AnyError> {
+fn begin_session(app: &AppHandle, mode: CaptureMode) -> Result<(), AnyError> {
     let state = app.state::<SessionState>();
     if !state.0.lock().unwrap().is_empty() {
         // セッション中の再発火は無視 / Ignore re-trigger while a session is active
         return Ok(());
     }
 
-    let freeze_dir = app.path().app_data_dir()?.join("freeze");
-    fs::create_dir_all(&freeze_dir)?;
+    let started = Instant::now();
+    // ウィンドウ候補はモニターキャプチャの前に列挙する（Z順を凍結時点に揃える）
+    // Enumerate window candidates before capturing (z-order matches the frozen moment)
+    let desktop_windows = if mode == CaptureMode::Window {
+        list_desktop_windows()
+    } else {
+        Vec::new()
+    };
+
+    // 全モニターを並列に撮影・エンコードする。xcapのMonitorはスレッド間で送れない
+    // （Send境界がない）ため、各スレッドがIDで自分のモニターを引き直す。
+    // Capture & encode all monitors in parallel. xcap's Monitor is not Send,
+    // so each thread re-resolves its own monitor by ID.
+    let monitor_ids: Vec<u32> = Monitor::all()?
+        .iter()
+        .filter_map(|m| m.id().ok())
+        .collect();
+    let captured: Vec<Result<(u32, i32, i32, f32, RgbaImage, Vec<u8>), String>> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = monitor_ids
+                .into_iter()
+                .map(|id| {
+                    scope.spawn(move || -> Result<_, String> {
+                        let monitor = Monitor::all()
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|m| m.id().is_ok_and(|mid| mid == id))
+                            .ok_or_else(|| format!("monitor {id} disappeared"))?;
+                        let t = Instant::now();
+                        let image = monitor.capture_image().map_err(|e| e.to_string())?;
+                        let capture_ms = t.elapsed().as_millis();
+                        let t = Instant::now();
+                        // 表示用は無圧縮BMP：PNG圧縮を避けて高速化 / Uncompressed BMP avoids PNG cost
+                        let mut bmp =
+                            Vec::with_capacity((image.width() * image.height() * 4 + 64) as usize);
+                        image
+                            .write_to(&mut Cursor::new(&mut bmp), ImageFormat::Bmp)
+                            .map_err(|e| e.to_string())?;
+                        eprintln!(
+                            "[auracap] monitor {id}: capture {capture_ms}ms, bmp encode {}ms",
+                            t.elapsed().as_millis()
+                        );
+                        Ok((
+                            id,
+                            monitor.x().map_err(|e| e.to_string())?,
+                            monitor.y().map_err(|e| e.to_string())?,
+                            monitor.scale_factor().map_err(|e| e.to_string())?,
+                            image,
+                            bmp,
+                        ))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
 
     let mut frames: HashMap<u32, Frame> = HashMap::new();
-    for monitor in Monitor::all()? {
-        let id = monitor.id()?;
-        let image = monitor.capture_image()?;
-        let path = freeze_dir.join(format!("{id}.png"));
-        image.save(&path)?;
+    for item in captured {
+        let (id, mon_x, mon_y, scale, image, bmp) = item?;
+        // ウィンドウ候補をモニターローカル座標へ変換 / Convert candidates to monitor-local coords
+        let windows: Vec<PickableWindow> = desktop_windows
+            .iter()
+            .map(|w| PickableWindow {
+                title: w.title.clone(),
+                x: w.x - mon_x,
+                y: w.y - mon_y,
+                width: w.width,
+                height: w.height,
+            })
+            .collect();
         let info = OverlayInfo {
             monitor_id: id,
-            x: monitor.x()?,
-            y: monitor.y()?,
+            x: mon_x,
+            y: mon_y,
             // 物理ピクセルはキャプチャ画像の実寸から取る / Physical pixels come from the captured image itself
             width: image.width(),
             height: image.height(),
-            scale: monitor.scale_factor()?,
-            image_path: path.to_string_lossy().into_owned(),
+            scale,
+            mode: mode.as_str().to_string(),
+            windows,
         };
-        frames.insert(id, Frame { info, image });
+        frames.insert(id, Frame { info, image, bmp });
     }
 
     let infos: Vec<OverlayInfo> = frames.values().map(|f| f.info.clone()).collect();
     *state.0.lock().unwrap() = frames;
 
-    // WebView2はメッセージポンプを持つスレッドでしか初期化できないため、
-    // ウィンドウ生成は必ずメインスレッドへディスパッチする
-    // WebView2 can only initialize on a thread with a message pump,
-    // so window creation must be dispatched to the main thread
+    // 常駐オーバーレイへセッション開始を通知（なければ生成）。
+    // WebView2はメッセージポンプを持つスレッドでしか初期化できないため、メインスレッドで行う。
+    // Notify resident overlays of the new session (create on demand if missing).
+    // WebView2 can only initialize on a thread with a message pump, hence the main thread.
     let app_handle = app.clone();
     app.run_on_main_thread(move || {
         for info in infos {
-            if let Err(e) = create_overlay_window(&app_handle, &info) {
-                eprintln!("[auracap] failed to create overlay window: {e}");
-                end_session(&app_handle);
-                return;
+            let label = format!("overlay-{}", info.monitor_id);
+            if app_handle.get_webview_window(&label).is_none() {
+                if let Err(e) =
+                    create_overlay_window(&app_handle, info.monitor_id, info.x, info.y, info.width, info.height)
+                {
+                    eprintln!("[auracap] failed to create overlay window: {e}");
+                    end_session(&app_handle);
+                    return;
+                }
+            }
+            if let Some(window) = app_handle.get_webview_window(&label) {
+                // モニター構成変化に備えて位置・サイズを毎回合わせ直す（物理px）
+                // Re-sync position/size every session in case the monitor layout changed (physical px)
+                let _ = window.set_position(PhysicalPosition::new(info.x, info.y));
+                let _ = window.set_size(PhysicalSize::new(info.width, info.height));
+            }
+            let _ = app_handle.emit_to(
+                EventTarget::labeled(&label),
+                "session-start",
+                info.monitor_id,
+            );
+        }
+        eprintln!(
+            "[auracap] session dispatched in {}ms",
+            Instant::now().duration_since(started).as_millis()
+        );
+    })?;
+
+    // 万一フロントが応答しなくても詰まないよう、2.5秒後に強制表示する保険
+    // Safety net: force-show overlays after 2.5s if the frontend never reports ready
+    let app_fallback = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(2500));
+        let ids: Vec<u32> = app_fallback
+            .state::<SessionState>()
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for id in ids {
+            if let Some(w) = app_fallback.get_webview_window(&format!("overlay-{id}")) {
+                if !w.is_visible().unwrap_or(true) {
+                    eprintln!("[auracap] overlay-{id} not ready after 2.5s, showing anyway");
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
             }
         }
-    })?;
+    });
     Ok(())
 }
 
-fn create_overlay_window(app: &AppHandle, info: &OverlayInfo) -> Result<(), AnyError> {
-    let label = format!("overlay-{}", info.monitor_id);
-    let url = WebviewUrl::App(format!("index.html?overlay={}", info.monitor_id).into());
+/// 起動時にオーバーレイウィンドウを事前生成して隠し常駐させる（切り替え高速化）
+/// Pre-create hidden overlay windows at startup so capture switching is instant
+pub fn pre_create_overlays(app: &AppHandle) {
+    let monitors = match Monitor::all() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[auracap] failed to enumerate monitors: {e}");
+            return;
+        }
+    };
+    for monitor in monitors {
+        let (Ok(id), Ok(x), Ok(y), Ok(w), Ok(h)) = (
+            monitor.id(),
+            monitor.x(),
+            monitor.y(),
+            monitor.width(),
+            monitor.height(),
+        ) else {
+            continue;
+        };
+        if let Err(e) = create_overlay_window(app, id, x, y, w, h) {
+            eprintln!("[auracap] failed to pre-create overlay {id}: {e}");
+        }
+    }
+}
+
+fn create_overlay_window(
+    app: &AppHandle,
+    monitor_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), AnyError> {
+    let label = format!("overlay-{monitor_id}");
+    let url = WebviewUrl::App(format!("index.html?overlay={monitor_id}").into());
     let window = WebviewWindowBuilder::new(app, &label, url)
         .decorations(false)
         .resizable(false)
         .skip_taskbar(true)
         .always_on_top(true)
         .visible(false)
+        // 白フラッシュ防止：ページ描画前の背景を黒にする / Avoid white flash before first paint
+        .background_color(tauri::window::Color(12, 12, 14, 255))
         .build()?;
     // 位置・サイズは論理pxではなく物理pxで正確に合わせる（DPI混在対策）
     // Position/size are set in physical px, not logical (mixed-DPI safety)
-    window.set_position(PhysicalPosition::new(info.x, info.y))?;
-    window.set_size(PhysicalSize::new(info.width, info.height))?;
-    window.show()?;
-    window.set_focus()?;
+    window.set_position(PhysicalPosition::new(x, y))?;
+    window.set_size(PhysicalSize::new(width, height))?;
     Ok(())
 }
 
-/// セッションを破棄しオーバーレイを全て閉じる / Drop the session and close all overlays
+/// 凍結画像の描画準備完了。ここで初めてオーバーレイを表示する（白フラッシュ防止）
+/// The frozen frame is ready to paint; only now is the overlay shown (avoids white flash)
+#[tauri::command]
+pub fn overlay_ready(app: AppHandle, monitor_id: u32) {
+    if let Some(window) = app.get_webview_window(&format!("overlay-{monitor_id}")) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// セッションを破棄しオーバーレイを隠す（ウィンドウは常駐させて使い回す）
+/// Drop the session and hide overlays (windows stay resident for reuse)
 pub fn end_session(app: &AppHandle) {
     if let Some(state) = app.try_state::<SessionState>() {
         state.0.lock().unwrap().clear();
     }
     for (label, window) in app.webview_windows() {
         if label.starts_with("overlay-") {
-            let _ = window.destroy();
+            let _ = window.hide();
+            // フロントの状態と古い凍結画像を破棄させる / Tell the frontend to reset & drop the old frame
+            let _ = app.emit_to(EventTarget::labeled(&label), "session-end", ());
         }
     }
     restore_main_if_needed(app);
@@ -186,44 +373,107 @@ pub fn capture_fullscreen(app: &AppHandle) {
     });
 }
 
-/// 前面ウィンドウをキャプチャ / Capture the foreground window
-pub fn capture_window(app: &AppHandle) {
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let result = (|| -> Result<(), AnyError> {
-            let rect = foreground_window_rect()?;
-            // ウィンドウ中心が属するモニターを撮影し、ウィンドウ矩形との交差部分を切り出す
-            // Capture the monitor containing the window center and crop the intersection
-            let center_x = (rect.left + rect.right) / 2;
-            let center_y = (rect.top + rect.bottom) / 2;
-            let monitor = Monitor::from_point(center_x, center_y)?;
-            let image = monitor.capture_image()?;
-            let (mon_x, mon_y) = (monitor.x()?, monitor.y()?);
+// ---- デスクトップウィンドウ列挙（ウィンドウピッカー用） ----
+// ---- Desktop window enumeration (for the window picker) ----
 
-            let left = (rect.left - mon_x).max(0) as u32;
-            let top = (rect.top - mon_y).max(0) as u32;
-            let right = ((rect.right - mon_x).max(0) as u32).min(image.width());
-            let bottom = ((rect.bottom - mon_y).max(0) as u32).min(image.height());
-            if right <= left || bottom <= top {
-                return Err("window rect is outside the captured monitor".into());
-            }
-            let cropped =
-                imageops::crop_imm(&image, left, top, right - left, bottom - top).to_image();
-            finalize(&app, cropped)?;
-            Ok(())
-        })();
-        if let Err(e) = result {
-            eprintln!("[auracap] window capture failed: {e}");
-        }
-        restore_main_if_needed(&app);
-    });
+struct DesktopWindow {
+    title: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
 }
 
-struct WinRect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+/// 可視トップレベルウィンドウをZ順（最前面が先頭）で列挙する
+/// List visible top-level windows in z-order (topmost first)
+fn list_desktop_windows() -> Vec<DesktopWindow> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Dwm::{
+        DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+        list.push(hwnd);
+        BOOL::from(true)
+    }
+
+    let mut hwnds: Vec<windows::Win32::Foundation::HWND> = Vec::new();
+    unsafe {
+        // EnumWindowsはZ順（最前面→最背面）で列挙する / EnumWindows yields top-to-bottom z-order
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut hwnds as *mut _ as isize));
+    }
+
+    let own_pid = unsafe { GetCurrentProcessId() };
+    let mut result = Vec::new();
+    for hwnd in hwnds {
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                continue;
+            }
+            // UWPのクローク（非表示状態の幽霊）ウィンドウを除外 / Skip cloaked (ghost) UWP windows
+            let mut cloaked: u32 = 0;
+            let _ = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            if cloaked != 0 {
+                continue;
+            }
+            if GetWindowTextLengthW(hwnd) == 0 {
+                continue;
+            }
+            // 自プロセス（オーバーレイ・メイン）を除外 / Skip our own windows
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == own_pid {
+                continue;
+            }
+            // デスクトップシェルの背景ウィンドウを除外 / Skip desktop shell background windows
+            let mut class_buf = [0u16; 64];
+            let class_len = GetClassNameW(hwnd, &mut class_buf);
+            let class_name = String::from_utf16_lossy(&class_buf[..class_len.max(0) as usize]);
+            if class_name == "Progman" || class_name == "WorkerW" {
+                continue;
+            }
+            // 影を除いた見た目通りの境界 / Visible bounds excluding the drop shadow
+            let mut rect = RECT::default();
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut rect as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let width = (rect.right - rect.left).max(0) as u32;
+            let height = (rect.bottom - rect.top).max(0) as u32;
+            if width < 8 || height < 8 {
+                continue;
+            }
+            let mut title_buf = vec![0u16; 256];
+            let title_len = GetWindowTextW(hwnd, &mut title_buf);
+            let title = String::from_utf16_lossy(&title_buf[..title_len.max(0) as usize]);
+            result.push(DesktopWindow {
+                title,
+                x: rect.left,
+                y: rect.top,
+                width,
+                height,
+            });
+        }
+    }
+    result
 }
 
 fn cursor_pos() -> Result<(i32, i32), AnyError> {
@@ -232,33 +482,6 @@ fn cursor_pos() -> Result<(i32, i32), AnyError> {
     let mut point = POINT::default();
     unsafe { GetCursorPos(&mut point)? };
     Ok((point.x, point.y))
-}
-
-fn foreground_window_rect() -> Result<WinRect, AnyError> {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
-    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() {
-        return Err("no foreground window".into());
-    }
-    // 影を除いた見た目通りの境界を取得 / Visible bounds excluding the drop shadow
-    let mut rect = RECT::default();
-    unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut rect as *mut _ as *mut core::ffi::c_void,
-            std::mem::size_of::<RECT>() as u32,
-        )?;
-    }
-    Ok(WinRect {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-    })
 }
 
 // ---- Tauri commands (フロントエンドから呼ばれる / invoked from the frontend) ----
@@ -282,11 +505,13 @@ pub fn start_capture(app: AppHandle, mode: String) {
         }
     }
     std::thread::spawn(move || {
-        // ウィンドウが画面合成から消えるのを待つ / Wait for the window to leave composition
-        std::thread::sleep(Duration::from_millis(250));
+        if was_visible {
+            // ウィンドウが画面合成から消えるのを待つ / Wait for the window to leave composition
+            std::thread::sleep(Duration::from_millis(250));
+        }
         match mode.as_str() {
-            "region" => start_region_capture(&app),
-            "window" => capture_window(&app),
+            "region" => start_overlay_capture(&app, CaptureMode::Region),
+            "window" => start_overlay_capture(&app, CaptureMode::Window),
             "fullscreen" => capture_fullscreen(&app),
             other => eprintln!("[auracap] unknown capture mode: {other}"),
         }

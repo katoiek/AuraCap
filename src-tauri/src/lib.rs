@@ -101,6 +101,33 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(capture::SessionState::default())
         .manage(capture::UiInitiated::default())
+        // 凍結フレーム（無圧縮BMP）をメモリから直接WebViewへ配信する
+        // Serve frozen frames (uncompressed BMP) to the webview straight from memory
+        .register_uri_scheme_protocol("freeze", |ctx, request| {
+            let app = ctx.app_handle();
+            let body: Option<Vec<u8>> = request
+                .uri()
+                .path()
+                .trim_start_matches('/')
+                .parse::<u32>()
+                .ok()
+                .and_then(|id| {
+                    let state = app.state::<capture::SessionState>();
+                    let guard = state.0.lock().unwrap();
+                    guard.get(&id).map(|frame| frame.bmp.clone())
+                });
+            match body {
+                Some(bytes) => tauri::http::Response::builder()
+                    .header("Content-Type", "image/bmp")
+                    .header("Cache-Control", "no-store")
+                    .body(bytes)
+                    .unwrap(),
+                None => tauri::http::Response::builder()
+                    .status(404)
+                    .body(Vec::new())
+                    .unwrap(),
+            }
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -109,9 +136,9 @@ pub fn run() {
                         return;
                     }
                     if shortcut.matches(Modifiers::empty(), Code::PrintScreen) {
-                        capture::start_region_capture(app);
+                        capture::start_overlay_capture(app, capture::CaptureMode::Region);
                     } else if shortcut.matches(Modifiers::CONTROL, Code::PrintScreen) {
-                        capture::capture_window(app);
+                        capture::start_overlay_capture(app, capture::CaptureMode::Window);
                     } else if shortcut.matches(Modifiers::SHIFT, Code::PrintScreen) {
                         capture::capture_fullscreen(app);
                     }
@@ -121,6 +148,9 @@ pub fn run() {
         .setup(|app| {
             register_shortcuts(app.handle());
             setup_tray(app.handle())?;
+            // オーバーレイを事前生成して隠し常駐させる（キャプチャ切り替え高速化）
+            // Pre-create hidden overlays so capture switching is fast
+            capture::pre_create_overlays(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -128,6 +158,7 @@ pub fn run() {
             capture::finish_region_capture,
             capture::cancel_capture,
             capture::start_capture,
+            capture::overlay_ready,
             open_history_dir,
             frontend_log
         ])
