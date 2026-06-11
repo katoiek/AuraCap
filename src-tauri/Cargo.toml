@@ -27,6 +27,7 @@ xcap = "0.9.6"
 arboard = "3.6.1"
 chrono = "0.4.45"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_System_Threading"] }
+tauri-plugin-dialog = "2"
 
 # 画像エンコード等の依存クレートはデバッグビルドでも最適化する（キャプチャ速度に直結）
 # Optimize dependency crates even in debug builds (directly affects capture speed)

@@ -114,11 +114,23 @@ function Overlay({ monitorId }: { monitorId: number }) {
       invoke<OverlayInfo | null>("get_overlay_info", { monitorId })
         .then((fresh) => {
           setInfo(fresh);
-          if (fresh) setImgVersion(Date.now());
+          if (fresh) {
+            setImgVersion(Date.now());
+            // ずれ診断：ウィンドウ実寸（物理px換算）と凍結画像実寸の不一致を検出する
+            // Misalignment diagnostics: window size in physical px vs the frozen frame size
+            const dpr = window.devicePixelRatio;
+            invoke("frontend_log", {
+              message:
+                `overlay ${monitorId}: win ${window.innerWidth}x${window.innerHeight} @dpr=${dpr} ` +
+                `= ${Math.round(window.innerWidth * dpr)}x${Math.round(window.innerHeight * dpr)}px, ` +
+                `frame ${fresh.width}x${fresh.height}px, screen(${window.screenX},${window.screenY})`,
+            });
+          }
         })
         .catch((e) => invoke("frontend_log", { message: `get_overlay_info failed: ${e}` }));
 
     const unlistenStart = win.listen("session-start", () => {
+      invoke("frontend_log", { message: `overlay ${monitorId}: session-start received` });
       resetState();
       load();
     });
@@ -304,11 +316,12 @@ function Overlay({ monitorId }: { monitorId: number }) {
           className="absolute inset-0 h-full w-full"
           draggable={false}
           alt=""
-          onLoad={() =>
+          onLoad={() => {
+            invoke("frontend_log", { message: `overlay ${monitorId}: frame loaded` });
             // 画像が描画できる状態になってからウィンドウを表示する（白フラッシュ防止）
             // Show the window only after the image can paint (avoids white flash)
-            invoke("overlay_ready", { monitorId })
-          }
+            invoke("overlay_ready", { monitorId });
+          }}
           onError={() =>
             invoke("frontend_log", { message: `frozen frame failed to load: monitor ${monitorId}` })
           }

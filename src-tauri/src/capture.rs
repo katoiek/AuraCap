@@ -220,6 +220,27 @@ fn begin_session(app: &AppHandle, mode: CaptureMode) -> Result<(), AnyError> {
                 // Re-sync position/size every session in case the monitor layout changed (physical px)
                 let _ = window.set_position(PhysicalPosition::new(info.x, info.y));
                 let _ = window.set_size(PhysicalSize::new(info.width, info.height));
+                // 影つき枠なしウィンドウは不可視枠のぶんクライアント領域が内側にずれる。
+                // 差分だけ外側へ動かし、描画領域をモニターへぴったり一致させる。
+                // 影自体は消さない：消すとDWMの高速合成が無効になり描画が極端に遅くなる。
+                // The shadow's invisible frame offsets the client area inward; shift the
+                // window outward by the measured delta so the client area matches the
+                // monitor exactly. The shadow itself stays on: removing it disables DWM's
+                // fast composition path and makes rendering extremely slow.
+                if let (Ok(outer), Ok(inner)) = (window.outer_position(), window.inner_position()) {
+                    let (dx, dy) = (inner.x - outer.x, inner.y - outer.y);
+                    if dx != 0 || dy != 0 {
+                        let _ = window.set_position(PhysicalPosition::new(info.x - dx, info.y - dy));
+                    }
+                }
+                // 配置結果の診断 / Placement diagnostics
+                if let (Ok(pos), Ok(size)) = (window.inner_position(), window.inner_size()) {
+                    eprintln!(
+                        "[auracap] overlay-{} client ({},{}) {}x{} (monitor ({},{}) {}x{} scale={})",
+                        info.monitor_id, pos.x, pos.y, size.width, size.height,
+                        info.x, info.y, info.width, info.height, info.scale
+                    );
+                }
             }
             let _ = app_handle.emit_to(
                 EventTarget::labeled(&label),
@@ -337,11 +358,12 @@ pub fn end_session(app: &AppHandle) {
     restore_main_if_needed(app);
 }
 
-/// 撮影結果を確定する：履歴へ自動保存し、クリップボードへコピー
-/// Finalize a capture: auto-save to history and copy to the clipboard
+/// 撮影結果を確定する：履歴へ自動保存→クリップボードへコピー→軽量エディタを開く
+/// Finalize a capture: auto-save to history, copy to the clipboard, then open the quick editor
 pub fn finalize(app: &AppHandle, image: RgbaImage) -> Result<String, AnyError> {
     let path = history::save(app, &image)?;
     copy_to_clipboard(&image)?;
+    crate::editor::open_editor(app, &image);
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -526,8 +548,12 @@ pub fn get_overlay_info(
     state.0.lock().unwrap().get(&monitor_id).map(|f| f.info.clone())
 }
 
+// 注意: このコマンドは必ずasyncにすること。同期コマンドはメインスレッドで実行され、
+// finalize内のエディタウィンドウ生成がイベントループと相互待ちしてデッドロックする。
+// NOTE: this command MUST stay async. Sync commands run on the main thread, and the
+// editor window creation inside finalize() deadlocks against the event loop there.
 #[tauri::command]
-pub fn finish_region_capture(
+pub async fn finish_region_capture(
     app: AppHandle,
     monitor_id: u32,
     x: u32,

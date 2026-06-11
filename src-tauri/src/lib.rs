@@ -1,6 +1,7 @@
 // AuraCap: トレイ常駐の画面キャプチャツール / Tray-resident screen capture tool
 
 mod capture;
+mod editor;
 mod history;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -97,10 +98,22 @@ pub(crate) fn show_main_window(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 非表示WebViewのバックグラウンド抑制を無効化する。
+    // 常駐オーバーレイ（ADR 0002）は隠れたままセッションイベントを受け取る必要がある。
+    // Disable hidden-webview background throttling: resident overlays (ADR 0002)
+    // must keep processing session events while hidden.
+    if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion",
+        );
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(capture::SessionState::default())
         .manage(capture::UiInitiated::default())
+        .manage(editor::EditorImage::default())
         // 凍結フレーム（無圧縮BMP）をメモリから直接WebViewへ配信する
         // Serve frozen frames (uncompressed BMP) to the webview straight from memory
         .register_uri_scheme_protocol("freeze", |ctx, request| {
@@ -128,6 +141,30 @@ pub fn run() {
                     .unwrap(),
             }
         })
+        // 編集対象画像を配信する。CORSヘッダはcanvasの汚染（taint）回避に必要
+        // Serve the image being edited; CORS header keeps the canvas untainted
+        .register_uri_scheme_protocol("edit", |ctx, _request| {
+            let app = ctx.app_handle();
+            let body: Option<Vec<u8>> = app
+                .state::<editor::EditorImage>()
+                .0
+                .lock()
+                .unwrap()
+                .clone();
+            match body {
+                Some(bytes) => tauri::http::Response::builder()
+                    .header("Content-Type", "image/bmp")
+                    .header("Cache-Control", "no-store")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(bytes)
+                    .unwrap(),
+                None => tauri::http::Response::builder()
+                    .status(404)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::new())
+                    .unwrap(),
+            }
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -148,9 +185,10 @@ pub fn run() {
         .setup(|app| {
             register_shortcuts(app.handle());
             setup_tray(app.handle())?;
-            // オーバーレイを事前生成して隠し常駐させる（キャプチャ切り替え高速化）
-            // Pre-create hidden overlays so capture switching is fast
+            // オーバーレイとエディタを事前生成して隠し常駐させる（切り替え高速化）
+            // Pre-create hidden overlays and the editor so switching is fast
             capture::pre_create_overlays(app.handle());
+            editor::pre_create_editor(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -159,17 +197,31 @@ pub fn run() {
             capture::cancel_capture,
             capture::start_capture,
             capture::overlay_ready,
+            editor::editor_ready,
+            editor::close_editor,
+            editor::editor_has_image,
+            editor::export_copy,
+            editor::export_save,
             open_history_dir,
             frontend_log
         ])
         .on_window_event(|window, event| {
-            // メインウィンドウは閉じても終了せずトレイに常駐する
-            // Closing the main window hides it; the app stays resident in the tray
-            if window.label() == "main" {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+            // メイン・エディタは閉じても破棄せず隠すだけ（常駐・使い回し）
+            // Main & editor windows hide on close instead of being destroyed (resident reuse)
+            match window.label() {
+                "main" => {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
                 }
+                "editor" => {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        editor::hide_editor(window.app_handle());
+                    }
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())
