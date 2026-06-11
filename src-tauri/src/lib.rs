@@ -4,6 +4,7 @@ mod bridge;
 mod capture;
 mod editor;
 mod history;
+mod redact;
 mod settings;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -263,6 +264,7 @@ pub fn run() {
             editor::editor_has_image,
             editor::export_copy,
             editor::export_save,
+            redact::detect_sensitive,
             open_history_dir,
             get_settings,
             set_hotkeys,

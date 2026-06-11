@@ -62,6 +62,8 @@ function Editor() {
   const scale = zoom ?? fitScale;
   const [textEdit, setTextEdit] = useState<{ id: string | null; x: number; y: number; value: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Smart Redact実行中フラグ / Smart Redact in-flight flag
+  const [redacting, setRedacting] = useState(false);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -302,6 +304,34 @@ function Editor() {
       invoke("frontend_log", { message: `export_save failed: ${e}` });
     }
   }, [renderToPng]);
+
+  // Smart Redact: ローカルOCRで機密情報らしき領域を検出し、ぼかしとして追加する
+  // Smart Redact: detect sensitive-looking regions with local OCR, add them as blurs
+  const runRedact = useCallback(async () => {
+    if (redacting) return;
+    setRedacting(true);
+    setToast("機密情報を検出中…");
+    try {
+      const regions = await invoke<{ x: number; y: number; w: number; h: number; kind: string }[]>(
+        "detect_sensitive",
+      );
+      if (regions.length === 0) {
+        showToast("機密らしき箇所は見つかりませんでした");
+      } else {
+        pushUndo();
+        setObjects((os) => [
+          ...os,
+          ...regions.map((r) => ({ id: nextId(), kind: "blur" as const, x: r.x, y: r.y, w: r.w, h: r.h })),
+        ]);
+        showToast(`${regions.length}件をぼかしました（不要なものは選択してDelete）`);
+      }
+    } catch (e) {
+      showToast(`検出に失敗しました: ${e}`);
+      invoke("frontend_log", { message: `detect_sensitive failed: ${e}` });
+    } finally {
+      setRedacting(false);
+    }
+  }, [redacting, pushUndo, showToast]);
 
   // ---- キーボード / Keyboard ----
   useEffect(() => {
@@ -587,6 +617,16 @@ function Editor() {
             style={{ backgroundColor: c }}
           />
         ))}
+        <div className="mx-2 h-6 w-px bg-zinc-700" />
+        {/* Smart Redact（ローカルOCR） / Smart Redact (local OCR) */}
+        <button
+          onClick={runRedact}
+          disabled={redacting}
+          title="メール・電話番号・APIキー等を検出してぼかします（ローカル処理、外部送信なし）"
+          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {redacting ? "検出中…" : "🛡 自動マスク"}
+        </button>
         <div className="mx-2 h-6 w-px bg-zinc-700" />
         {/* 表示ズーム / Display zoom */}
         <button

@@ -29,7 +29,22 @@ chrono = "0.4.45"
 # ブラウザ拡張からのフルページキャプチャ受信用（ローカルHTTPブリッジ）
 # Local HTTP bridge that receives full-page captures from the browser extension
 tiny_http = "0.12"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_System_Threading"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Threading",
+    # Smart Redact用（Windows標準OCR） / For Smart Redact (built-in Windows OCR)
+    "Win32_System_WinRT",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Globalization",
+    "Foundation",
+    "Foundation_Collections",
+] }
+# Smart Redactの機密パターン検出 / Sensitive-pattern matching for Smart Redact
+regex = "1"
 tauri-plugin-dialog = "2"
 
 # 画像エンコード等の依存クレートはデバッグビルドでも最適化する（キャプチャ速度に直結）
