@@ -50,6 +50,11 @@ const HANDLE_CURSOR: Record<Handle, string> = {
 // 誤クリック扱いにする最小サイズ（物理px） / Minimum size below which a drag is ignored (physical px)
 const MIN_SELECTION_PX = 4;
 
+// ルーペ（拡大鏡）の表示サイズと倍率：1pxを8px角で表示する
+// Loupe size & zoom: each source pixel shows as an 8px cell
+const LOUPE_SIZE = 144;
+const LOUPE_ZOOM = 8;
+
 function clampRect(r: Rect, vw: number, vh: number): Rect {
   const left = Math.max(0, Math.min(r.left, vw - 1));
   const top = Math.max(0, Math.min(r.top, vh - 1));
@@ -75,6 +80,10 @@ function Overlay({ monitorId }: { monitorId: number }) {
   const [phase, setPhase] = useState<Phase>("pick");
   const [rect, setRect] = useState<Rect | null>(null);
   const [hover, setHover] = useState<{ rect: Rect; title: string } | null>(null);
+  // ルーペ用のカーソル位置（CSS px、矩形モードのみ追跡） / Cursor for the loupe (CSS px, region mode only)
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  const frameImgRef = useRef<HTMLImageElement | null>(null);
+  const loupeRef = useRef<HTMLCanvasElement | null>(null);
   const gesture = useRef<Gesture | null>(null);
   const submitting = useRef(false);
 
@@ -103,6 +112,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
     submitting.current = false;
     setRect(null);
     setHover(null);
+    setCursor(null);
     setPhase("pick");
   }, []);
 
@@ -248,9 +258,16 @@ function Overlay({ monitorId }: { monitorId: number }) {
       return;
     }
     const g = gesture.current;
-    if (!g) return;
+    // ルーペ用のカーソル追跡：矩形モード中、または調整モードでの枠変更・移動中
+    // Track the cursor for the loupe: region mode, or while resizing/moving in adjust mode
+    const trackCursor =
+      (info.mode === "region" && (phase === "pick" || phase === "drag")) ||
+      (phase === "adjust" && g !== null && (g.kind === "move" || g.kind === "resize"));
+    if (!g && !trackCursor) return;
 
     schedule(() => {
+      if (trackCursor) setCursor({ x: cx, y: cy });
+      if (!g) return;
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       if (g.kind === "draw") {
@@ -275,21 +292,63 @@ function Overlay({ monitorId }: { monitorId: number }) {
     });
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (e: React.PointerEvent) => {
     const g = gesture.current;
     gesture.current = null;
     if (phase === "drag") {
       const dpr = window.devicePixelRatio;
-      if (!rect || rect.width * dpr < MIN_SELECTION_PX || rect.height * dpr < MIN_SELECTION_PX) {
+      // 最終矩形はrAF反映待ちのrectではなくポインタ座標から直接計算する（1フレームの取りこぼし防止）
+      // Compute the final rect from the pointer itself, not the rAF-delayed state (no lost frame)
+      const final =
+        g?.kind === "draw"
+          ? clampRect(normalize(g.ax, g.ay, e.clientX, e.clientY), window.innerWidth, window.innerHeight)
+          : rect;
+      if (!final || final.width * dpr < MIN_SELECTION_PX || final.height * dpr < MIN_SELECTION_PX) {
         setRect(null);
         setPhase("pick");
       } else {
-        setPhase("adjust");
+        // 矩形モードはドロップで即キャプチャ。調整モードはウィンドウ選択時のみ
+        // Region mode captures immediately on drop; adjust mode is window-picking only
+        setRect(final);
+        confirm(final);
       }
     } else if (g && (g.kind === "move" || g.kind === "resize")) {
-      // 調整継続 / Stay in adjust phase
+      // 調整継続。ルーペは操作中のみ表示するため消す / Stay in adjust; hide the loupe (shown only mid-gesture)
+      setCursor(null);
     }
   };
+
+  // ルーペ描画：カーソル周辺の物理ピクセルを等倍セルで拡大表示する
+  // Draw the loupe: magnify the physical pixels around the cursor
+  useEffect(() => {
+    const canvas = loupeRef.current;
+    const img = frameImgRef.current;
+    if (!canvas || !img || !cursor) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio;
+    const src = LOUPE_SIZE / LOUPE_ZOOM; // 取り込む元領域（物理px） / Source region (physical px)
+    const px = Math.floor(cursor.x * dpr);
+    const py = Math.floor(cursor.y * dpr);
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = "#18181b";
+    ctx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    ctx.drawImage(img, px - src / 2, py - src / 2, src, src, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    // 十字線はカーソルピクセルの中心を通す / Crosshair through the cursor pixel's center
+    const c = LOUPE_SIZE / 2;
+    const m = c + LOUPE_ZOOM / 2;
+    ctx.strokeStyle = "rgba(251, 191, 36, 0.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(m, 0);
+    ctx.lineTo(m, LOUPE_SIZE);
+    ctx.moveTo(0, m);
+    ctx.lineTo(LOUPE_SIZE, m);
+    ctx.stroke();
+    // 中心ピクセルのセルを強調 / Highlight the cursor pixel cell
+    ctx.strokeStyle = "#fbbf24";
+    ctx.strokeRect(c + 0.5, c + 0.5, LOUPE_ZOOM - 1, LOUPE_ZOOM - 1);
+  }, [cursor]);
 
   if (!info) {
     return <div className="h-screen w-screen bg-black/40" />;
@@ -312,6 +371,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
       {/* 凍結フレーム（無圧縮BMPをメモリから直接配信） / Frozen frame (uncompressed BMP served from memory) */}
       {imgVersion > 0 && (
         <img
+          ref={frameImgRef}
           src={`http://freeze.localhost/${monitorId}?v=${imgVersion}`}
           className="absolute inset-0 h-full w-full"
           draggable={false}
@@ -394,6 +454,38 @@ function Overlay({ monitorId }: { monitorId: number }) {
         </div>
       ) : (
         <div className="pointer-events-none absolute inset-0 bg-black/35" />
+      )}
+
+      {/* ルーペ：矩形モード中と、調整モードの枠変更・移動中に表示（1px単位の調整用） */}
+      {/* Loupe: shown in region mode and while adjusting the frame, for 1px-precision aiming */}
+      {cursor && imgVersion > 0 && (
+        <div
+          className="pointer-events-none absolute z-50"
+          style={{
+            // デフォルトはカーソルの左下。画面端では右・上へ回り込む
+            // Defaults to the cursor's lower-left; flips right/up near screen edges
+            left:
+              cursor.x - 24 - LOUPE_SIZE < 0
+                ? cursor.x + 24
+                : cursor.x - 24 - LOUPE_SIZE,
+            top:
+              cursor.y + 24 + LOUPE_SIZE + 28 > window.innerHeight
+                ? cursor.y - 24 - LOUPE_SIZE - 28
+                : cursor.y + 24,
+          }}
+        >
+          <canvas
+            ref={loupeRef}
+            width={LOUPE_SIZE}
+            height={LOUPE_SIZE}
+            className="block rounded-lg border-2 border-amber-400 shadow-lg"
+          />
+          <div className="mt-1 rounded bg-zinc-900/90 px-1.5 py-0.5 text-center font-mono text-xs text-amber-300">
+            {(phase === "drag" || phase === "adjust") && rect
+              ? `${Math.round(rect.width * dpr)} × ${Math.round(rect.height * dpr)}`
+              : `${Math.floor(cursor.x * dpr)}, ${Math.floor(cursor.y * dpr)}`}
+          </div>
+        </div>
       )}
     </div>
   );

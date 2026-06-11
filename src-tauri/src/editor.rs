@@ -65,6 +65,16 @@ pub fn open_editor(app: &AppHandle, image: &RgbaImage) {
         let app_fallback = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(2500));
+            // すでに閉じられている（編集対象が破棄済み）なら何もしない。
+            // これがないと「開いてすぐ閉じた」エディタを空のまま再表示してしまう。
+            // Skip if the editor was already closed (image dropped); otherwise this
+            // would re-show an editor the user just closed, with no image in it.
+            let still_open = app_fallback
+                .try_state::<EditorImage>()
+                .is_some_and(|s| s.0.lock().unwrap().is_some());
+            if !still_open {
+                return;
+            }
             if let Some(w) = app_fallback.get_webview_window("editor") {
                 if !w.is_visible().unwrap_or(true) {
                     eprintln!("[auracap] editor not ready after 2.5s, showing anyway");
