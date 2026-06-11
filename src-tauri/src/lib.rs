@@ -60,10 +60,10 @@ fn get_settings(state: tauri::State<'_, settings::SettingsState>) -> settings::S
     state.0.lock().unwrap().clone()
 }
 
-/// ホットキー設定を検証つきで適用・保存する。登録に失敗したら元の設定へ戻す
-/// Apply & persist hotkey settings with validation; roll back on failure
+/// 設定を検証つきで適用・保存する。ホットキー登録に失敗したら元の設定へ戻す
+/// Apply & persist settings with validation; roll back hotkeys on failure
 #[tauri::command]
-fn set_hotkeys(app: AppHandle, settings: settings::Settings) -> Result<(), String> {
+fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<(), String> {
     let errors = apply_hotkeys(&app, &settings);
     if !errors.is_empty() {
         let old = app.state::<settings::SettingsState>().0.lock().unwrap().clone();
@@ -267,7 +267,7 @@ pub fn run() {
             redact::detect_sensitive,
             open_history_dir,
             get_settings,
-            set_hotkeys,
+            save_settings,
             suspend_hotkeys,
             resume_hotkeys,
             frontend_log

@@ -64,6 +64,9 @@ function Editor() {
   const [toast, setToast] = useState<string | null>(null);
   // Smart Redact実行中フラグ / Smart Redact in-flight flag
   const [redacting, setRedacting] = useState(false);
+  // Screenshot-to-Code: 生成中フラグと生成結果 / Codegen in-flight flag and result
+  const [generating, setGenerating] = useState(false);
+  const [genCode, setGenCode] = useState<string | null>(null);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -332,6 +335,85 @@ function Editor() {
       setRedacting(false);
     }
   }, [redacting, pushUndo, showToast]);
+
+  // Screenshot-to-Code: 編集後の画像をClaude APIへ送り、Tailwind単一HTMLを生成する
+  // Screenshot-to-Code: send the edited image to the Claude API for a single-file Tailwind HTML
+  const runCodegen = useCallback(async () => {
+    if (generating) return;
+    try {
+      const settings = await invoke<{ anthropicApiKey: string }>("get_settings");
+      const apiKey = settings.anthropicApiKey?.trim();
+      if (!apiKey) {
+        showToast("メイン画面でClaude APIキーを設定してください");
+        return;
+      }
+      const png = await renderToPng();
+      if (!png) return;
+      setGenerating(true);
+
+      // APIの画像上限（8000px）に収まるよう縮小し、サイズ削減のためJPEG化
+      // Downscale within the API's 8000px image limit; JPEG to keep the payload small
+      const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
+      const k = Math.min(1, 7800 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * k));
+      canvas.height = Math.max(1, Math.round(bitmap.height * k));
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+      const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          // WebViewから直接呼ぶための明示オプトイン / Explicit opt-in for direct browser calls
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-fable-5",
+          max_tokens: 16000,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/jpeg", data: base64 },
+                },
+                {
+                  type: "text",
+                  text:
+                    "このUIスクリーンショットを、Tailwind CSS（CDN版）を使った単一のHTMLファイルとして忠実に再現してください。" +
+                    "レイアウト・配色・余白・フォントサイズをできるだけ正確に。写真やイラスト部分はプレースホルダーで構いません。" +
+                    "完全なHTMLコードのみを出力してください（説明文・コードフェンスは不要）。",
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`API ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      let code: string = (data.content ?? [])
+        .filter((b: { type: string }) => b.type === "text")
+        .map((b: { text: string }) => b.text)
+        .join("\n");
+      // コードフェンス付きで返ってきた場合は剥がす / Strip code fences if present
+      code = code.replace(/^```[a-z]*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+      setGenCode(code || "（出力が空でした）");
+    } catch (e) {
+      showToast(`コード生成に失敗しました: ${String(e).slice(0, 120)}`);
+      invoke("frontend_log", { message: `codegen failed: ${e}` });
+    } finally {
+      setGenerating(false);
+    }
+  }, [generating, renderToPng, showToast]);
 
   // ---- キーボード / Keyboard ----
   useEffect(() => {
@@ -627,6 +709,15 @@ function Editor() {
         >
           {redacting ? "検出中…" : "🛡 自動マスク"}
         </button>
+        {/* Screenshot-to-Code（Claude API） */}
+        <button
+          onClick={runCodegen}
+          disabled={generating}
+          title="このスクリーンショットからTailwind CSSのHTMLを生成します（Claude API使用）"
+          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {generating ? "生成中…" : "⧉ コード生成"}
+        </button>
         <div className="mx-2 h-6 w-px bg-zinc-700" />
         {/* 表示ズーム / Display zoom */}
         <button
@@ -871,6 +962,37 @@ function Editor() {
       {toast && (
         <div className="pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 rounded-lg bg-zinc-800 px-4 py-2 text-sm text-amber-300 shadow-lg">
           {toast}
+        </div>
+      )}
+
+      {/* 生成コードのモーダル / Generated-code modal */}
+      {genCode !== null && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6">
+          <div className="flex max-h-full w-full max-w-3xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+              <h2 className="text-sm font-semibold">生成されたHTML（Tailwind CSS）</h2>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(genCode);
+                    showToast("コードをコピーしました");
+                  }}
+                  className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+                >
+                  コピー
+                </button>
+                <button
+                  onClick={() => setGenCode(null)}
+                  className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+                >
+                  閉じる
+                </button>
+              </div>
+            </div>
+            <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-4 text-xs leading-relaxed text-zinc-300">
+              {genCode}
+            </pre>
+          </div>
         </div>
       )}
     </div>

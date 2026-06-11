@@ -10,12 +10,14 @@ type Settings = {
   hotkeyRegion: string;
   hotkeyWindow: string;
   hotkeyFullscreen: string;
+  anthropicApiKey: string;
 };
 
 const DEFAULT_SETTINGS: Settings = {
   hotkeyRegion: "PrintScreen",
   hotkeyWindow: "Ctrl+PrintScreen",
   hotkeyFullscreen: "Shift+PrintScreen",
+  anthropicApiKey: "",
 };
 
 const MODES = [
@@ -90,6 +92,8 @@ function Home() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [recording, setRecording] = useState<keyof Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // APIキー入力の下書き（nullなら未編集） / API key draft (null = untouched)
+  const [keyDraft, setKeyDraft] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<Settings>("get_settings")
@@ -97,15 +101,17 @@ function Home() {
       .catch(() => setSettings(DEFAULT_SETTINGS));
   }, []);
 
-  const applyHotkeys = useCallback(async (next: Settings) => {
+  const applySettings = useCallback(async (next: Settings) => {
     try {
-      await invoke("set_hotkeys", { settings: next });
+      await invoke("save_settings", { settings: next });
       setSettings(next);
       setError(null);
+      return true;
     } catch (e) {
       setError(String(e));
       // 失敗時はバックエンドが旧設定へ戻している / Backend already rolled back
       await invoke("resume_hotkeys").catch(() => {});
+      return false;
     }
   }, []);
 
@@ -115,7 +121,7 @@ function Home() {
     const finish = (combo: string | null) => {
       setRecording(null);
       if (combo) {
-        applyHotkeys({ ...settings, [recording]: combo });
+        applySettings({ ...settings, [recording]: combo });
       } else {
         invoke("resume_hotkeys").catch(() => {});
       }
@@ -140,7 +146,7 @@ function Home() {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
     };
-  }, [recording, settings, applyHotkeys]);
+  }, [recording, settings, applySettings]);
 
   const startRecording = (key: keyof Settings) => {
     setError(null);
@@ -196,6 +202,34 @@ function Home() {
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
 
+      {/* Screenshot-to-Code用のClaude APIキー / Claude API key for Screenshot-to-Code */}
+      <div className="flex items-center gap-2">
+        <label className="shrink-0 text-xs text-zinc-400" htmlFor="api-key">
+          Claude APIキー
+        </label>
+        <input
+          id="api-key"
+          type="password"
+          placeholder="sk-ant-…（コード生成に使用）"
+          value={keyDraft ?? settings?.anthropicApiKey ?? ""}
+          onChange={(e) => setKeyDraft(e.target.value)}
+          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+        />
+        {keyDraft !== null && (
+          <button
+            onClick={async () => {
+              if (!settings) return;
+              if (await applySettings({ ...settings, anthropicApiKey: keyDraft.trim() })) {
+                setKeyDraft(null);
+              }
+            }}
+            className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+          >
+            保存
+          </button>
+        )}
+      </div>
+
       <div className="mt-auto flex items-center gap-2">
         <button
           onClick={() => invoke("open_history_dir")}
@@ -204,7 +238,10 @@ function Home() {
           履歴フォルダを開く
         </button>
         <button
-          onClick={() => applyHotkeys(DEFAULT_SETTINGS)}
+          onClick={() =>
+            settings &&
+            applySettings({ ...DEFAULT_SETTINGS, anthropicApiKey: settings.anthropicApiKey })
+          }
           title="ショートカットを初期設定に戻す"
           className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
         >

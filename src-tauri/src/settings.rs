@@ -17,6 +17,9 @@ pub struct Settings {
     pub hotkey_region: String,
     pub hotkey_window: String,
     pub hotkey_fullscreen: String,
+    /// Screenshot-to-Code用のClaude APIキー（ローカル保存・個人用ツールの割り切り）
+    /// Claude API key for Screenshot-to-Code (stored locally; personal-tool tradeoff)
+    pub anthropic_api_key: String,
 }
 
 impl Default for Settings {
@@ -25,6 +28,7 @@ impl Default for Settings {
             hotkey_region: "PrintScreen".into(),
             hotkey_window: "Ctrl+PrintScreen".into(),
             hotkey_fullscreen: "Shift+PrintScreen".into(),
+            anthropic_api_key: String::new(),
         }
     }
 }
