@@ -56,7 +56,10 @@ function Editor() {
   const [selected, setSelected] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [color, setColor] = useState(COLORS[0]);
-  const [scale, setScale] = useState(1);
+  const [fitScale, setFitScale] = useState(1);
+  // 表示ズーム。nullはフィット表示（ウィンドウに合わせる） / Display zoom; null = fit to viewport
+  const [zoom, setZoom] = useState<number | null>(null);
+  const scale = zoom ?? fitScale;
   const [textEdit, setTextEdit] = useState<{ id: string | null; x: number; y: number; value: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -82,6 +85,7 @@ function Editor() {
     setSelected(null);
     setTool("select");
     setTextEdit(null);
+    setZoom(null);
     gesture.current = null;
     undoStack.current = [];
   }, []);
@@ -127,7 +131,7 @@ function Editor() {
     if (!imgSize || !viewportRef.current) return;
     const vw = viewportRef.current.clientWidth - 24;
     const vh = viewportRef.current.clientHeight - 24;
-    setScale(Math.min(1, vw / imgSize.w, vh / imgSize.h));
+    setFitScale(Math.min(1, vw / imgSize.w, vh / imgSize.h));
   }, [imgSize]);
 
   useEffect(() => {
@@ -136,6 +140,34 @@ function Editor() {
     if (viewportRef.current) ro.observe(viewportRef.current);
     return () => ro.disconnect();
   }, [recomputeScale]);
+
+  // 段階ズーム / Stepped zoom levels
+  const stepZoom = useCallback(
+    (dir: 1 | -1) => {
+      const levels = [0.1, 0.15, 0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+      const cur = zoom ?? fitScale;
+      const next =
+        dir > 0
+          ? levels.find((l) => l > cur * 1.001)
+          : [...levels].reverse().find((l) => l < cur * 0.999);
+      if (next) setZoom(next);
+    },
+    [zoom, fitScale],
+  );
+
+  // Ctrl+ホイールでズーム。preventDefaultにはネイティブの非passiveリスナーが必要
+  // Ctrl+wheel zoom; preventDefault needs a native non-passive listener
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      stepZoom(e.deltaY < 0 ? 1 : -1);
+    };
+    vp.addEventListener("wheel", onWheel, { passive: false });
+    return () => vp.removeEventListener("wheel", onWheel);
+  }, [stepZoom]);
 
   const pushUndo = useCallback(() => {
     undoStack.current.push({
@@ -287,10 +319,23 @@ function Editor() {
         e.preventDefault();
         doSave();
       }
+      // 表示ズーム / Display zoom
+      if (e.ctrlKey && (e.key === "+" || e.key === "=" || e.key === ";")) {
+        e.preventDefault();
+        stepZoom(1);
+      }
+      if (e.ctrlKey && e.key === "-") {
+        e.preventDefault();
+        stepZoom(-1);
+      }
+      if (e.ctrlKey && e.key === "0") {
+        e.preventDefault();
+        setZoom(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, textEdit, undo, doCopy, doSave, pushUndo]);
+  }, [selected, textEdit, undo, doCopy, doSave, pushUndo, stepZoom]);
 
   // ---- ポインタ操作 / Pointer interactions ----
 
@@ -542,6 +587,31 @@ function Editor() {
             style={{ backgroundColor: c }}
           />
         ))}
+        <div className="mx-2 h-6 w-px bg-zinc-700" />
+        {/* 表示ズーム / Display zoom */}
+        <button
+          onClick={() => stepZoom(-1)}
+          title="ズームアウト (Ctrl+-)"
+          className="grid h-8 w-8 place-items-center rounded-lg bg-zinc-800 text-base text-zinc-300 hover:bg-zinc-700"
+        >
+          −
+        </button>
+        <button
+          onClick={() => setZoom(null)}
+          title="ウィンドウに合わせる (Ctrl+0)"
+          className={`min-w-14 rounded-lg px-2 py-1.5 text-center font-mono text-xs hover:bg-zinc-700 ${
+            zoom === null ? "bg-zinc-800 text-zinc-400" : "bg-zinc-700 text-amber-300"
+          }`}
+        >
+          {Math.round(scale * 100)}%
+        </button>
+        <button
+          onClick={() => stepZoom(1)}
+          title="ズームイン (Ctrl++ / Ctrl+ホイール)"
+          className="grid h-8 w-8 place-items-center rounded-lg bg-zinc-800 text-base text-zinc-300 hover:bg-zinc-700"
+        >
+          ＋
+        </button>
         <div className="ml-auto flex items-center gap-1.5">
           <button
             onClick={doCopy}
@@ -567,10 +637,12 @@ function Editor() {
       </header>
 
       {/* ステージ / Stage */}
-      <div ref={viewportRef} className="grid flex-1 place-items-center overflow-hidden p-3">
-        {imgSize === null && <div className="text-sm text-zinc-500">読み込み中…</div>}
+      {/* ズーム時にスクロールできるようoverflow-auto、小さい画像はm-autoで中央寄せ */}
+      {/* overflow-auto enables scrolling when zoomed; m-auto centers small images */}
+      <div ref={viewportRef} className="flex flex-1 overflow-auto p-3">
+        {imgSize === null && <div className="m-auto text-sm text-zinc-500">読み込み中…</div>}
         <div
-          className="relative"
+          className="relative m-auto"
           style={imgSize ? { width: imgSize.w * scale, height: imgSize.h * scale } : { width: 0, height: 0 }}
         >
           <img

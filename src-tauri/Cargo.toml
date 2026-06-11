@@ -26,6 +26,9 @@ tauri-plugin-global-shortcut = "2"
 xcap = "0.9.6"
 arboard = "3.6.1"
 chrono = "0.4.45"
+# ブラウザ拡張からのフルページキャプチャ受信用（ローカルHTTPブリッジ）
+# Local HTTP bridge that receives full-page captures from the browser extension
+tiny_http = "0.12"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_System_Threading"] }
 tauri-plugin-dialog = "2"
 

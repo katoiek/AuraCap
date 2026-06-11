@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "AuraCap フルページキャプチャ",
+  "version": "0.1.0",
+  "description": "表示中のページ全体をキャプチャしてAuraCapへ送ります / Capture the full page into AuraCap",
+  "action": {
+    "default_title": "AuraCapでフルページキャプチャ"
+  },
+  "permissions": ["debugger", "activeTab"],
+  "host_permissions": ["http://127.0.0.1:14820/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

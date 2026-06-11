@@ -1,5 +1,6 @@
 // AuraCap: トレイ常駐の画面キャプチャツール / Tray-resident screen capture tool
 
+mod bridge;
 mod capture;
 mod editor;
 mod history;
@@ -189,6 +190,9 @@ pub fn run() {
             // Pre-create hidden overlays and the editor so switching is fast
             capture::pre_create_overlays(app.handle());
             editor::pre_create_editor(app.handle());
+            // ブラウザ拡張からのフルページキャプチャ受信ブリッジ
+            // Local bridge that receives full-page captures from the browser extension
+            bridge::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
