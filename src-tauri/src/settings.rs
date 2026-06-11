@@ -1,0 +1,58 @@
+// ユーザー設定の読み書き。app_config_dir/settings.json にJSONで永続化する
+// User settings persistence: JSON at app_config_dir/settings.json
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager};
+
+/// ホットキーはtauri-plugin-global-shortcutが解釈する文字列で保持する
+/// （例: "PrintScreen", "Ctrl+PrintScreen", "Ctrl+Shift+KeyA"）
+/// Hotkeys are stored as strings understood by tauri-plugin-global-shortcut
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settings {
+    pub hotkey_region: String,
+    pub hotkey_window: String,
+    pub hotkey_fullscreen: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            hotkey_region: "PrintScreen".into(),
+            hotkey_window: "Ctrl+PrintScreen".into(),
+            hotkey_fullscreen: "Shift+PrintScreen".into(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct SettingsState(pub Mutex<Settings>);
+
+fn settings_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("settings.json"))
+}
+
+/// 設定ファイルを読む。壊れている・存在しない場合は既定値
+/// Load settings; fall back to defaults if missing or corrupted
+pub fn load(app: &AppHandle) -> Settings {
+    settings_path(app)
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(app).ok_or("設定フォルダを解決できません / config dir unavailable")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| e.to_string())
+}

@@ -4,11 +4,12 @@ mod bridge;
 mod capture;
 mod editor;
 mod history;
+mod settings;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// フロントエンドのエラーをターミナルへ転送する / Forward frontend errors to the terminal
 #[tauri::command]
@@ -25,17 +26,65 @@ fn open_history_dir(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// デフォルトホットキーを登録する / Register the default hotkeys
-/// 領域=PrintScreen, ウィンドウ=Ctrl+PrintScreen, 全画面=Shift+PrintScreen
-fn register_shortcuts(app: &AppHandle) {
-    for keys in ["PrintScreen", "Ctrl+PrintScreen", "Shift+PrintScreen"] {
-        match app.global_shortcut().register(keys) {
-            Ok(()) => eprintln!("[auracap] registered shortcut: {keys}"),
-            // 他アプリが既に掴んでいる場合でも起動は続行する
-            // Keep running even if another app already owns the key
-            Err(e) => eprintln!("[auracap] failed to register shortcut {keys}: {e}"),
+/// 設定のホットキーを登録し直す。失敗したキーの説明文を返す（空 = 全成功）
+/// Re-register hotkeys from settings; returns failure descriptions (empty = all OK)
+fn apply_hotkeys(app: &AppHandle, settings: &settings::Settings) -> Vec<String> {
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    let mut errors = Vec::new();
+    for (name, keys) in [
+        ("矩形", &settings.hotkey_region),
+        ("ウィンドウ", &settings.hotkey_window),
+        ("全画面", &settings.hotkey_fullscreen),
+    ] {
+        if keys.is_empty() {
+            continue;
+        }
+        match gs.register(keys.as_str()) {
+            Ok(()) => eprintln!("[auracap] registered shortcut: {keys} ({name})"),
+            // 他アプリが掴んでいる・重複・不正キーなど / Owned by another app, duplicate, invalid, etc.
+            Err(e) => {
+                eprintln!("[auracap] failed to register shortcut {keys}: {e}");
+                errors.push(format!("{name}（{keys}）"));
+            }
         }
     }
+    errors
+}
+
+// ---- 設定コマンド / Settings commands ----
+
+#[tauri::command]
+fn get_settings(state: tauri::State<'_, settings::SettingsState>) -> settings::Settings {
+    state.0.lock().unwrap().clone()
+}
+
+/// ホットキー設定を検証つきで適用・保存する。登録に失敗したら元の設定へ戻す
+/// Apply & persist hotkey settings with validation; roll back on failure
+#[tauri::command]
+fn set_hotkeys(app: AppHandle, settings: settings::Settings) -> Result<(), String> {
+    let errors = apply_hotkeys(&app, &settings);
+    if !errors.is_empty() {
+        let old = app.state::<settings::SettingsState>().0.lock().unwrap().clone();
+        let _ = apply_hotkeys(&app, &old);
+        return Err(format!("登録できないキーがあります: {}", errors.join("、")));
+    }
+    settings::save(&app, &settings)?;
+    *app.state::<settings::SettingsState>().0.lock().unwrap() = settings;
+    Ok(())
+}
+
+/// キー入力の録取中はグローバルホットキーを一時停止する（録取中の誤発火防止）
+/// Suspend global hotkeys while the UI is recording a key combo
+#[tauri::command]
+fn suspend_hotkeys(app: AppHandle) {
+    let _ = app.global_shortcut().unregister_all();
+}
+
+#[tauri::command]
+fn resume_hotkeys(app: AppHandle) {
+    let current = app.state::<settings::SettingsState>().0.lock().unwrap().clone();
+    let _ = apply_hotkeys(&app, &current);
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -173,18 +222,26 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    if shortcut.matches(Modifiers::empty(), Code::PrintScreen) {
+                    // 設定された文字列と突き合わせて該当モードを起動する
+                    // Match against the configured hotkey strings
+                    let current = app.state::<settings::SettingsState>().0.lock().unwrap().clone();
+                    let matches =
+                        |keys: &str| keys.parse::<Shortcut>().is_ok_and(|s| s == *shortcut);
+                    if matches(&current.hotkey_region) {
                         capture::start_overlay_capture(app, capture::CaptureMode::Region);
-                    } else if shortcut.matches(Modifiers::CONTROL, Code::PrintScreen) {
+                    } else if matches(&current.hotkey_window) {
                         capture::start_overlay_capture(app, capture::CaptureMode::Window);
-                    } else if shortcut.matches(Modifiers::SHIFT, Code::PrintScreen) {
+                    } else if matches(&current.hotkey_fullscreen) {
                         capture::capture_fullscreen(app);
                     }
                 })
                 .build(),
         )
         .setup(|app| {
-            register_shortcuts(app.handle());
+            // 設定を読み込んでからホットキーを登録する / Load settings, then register hotkeys
+            let loaded = settings::load(app.handle());
+            app.manage(settings::SettingsState(std::sync::Mutex::new(loaded.clone())));
+            apply_hotkeys(app.handle(), &loaded);
             setup_tray(app.handle())?;
             // オーバーレイとエディタを事前生成して隠し常駐させる（切り替え高速化）
             // Pre-create hidden overlays and the editor so switching is fast
@@ -207,6 +264,10 @@ pub fn run() {
             editor::export_copy,
             editor::export_save,
             open_history_dir,
+            get_settings,
+            set_hotkeys,
+            suspend_hotkeys,
+            resume_hotkeys,
             frontend_log
         ])
         .on_window_event(|window, event| {

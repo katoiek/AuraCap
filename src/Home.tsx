@@ -1,32 +1,154 @@
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 // メインウィンドウ：キャプチャモードのボタンが主役、ショートカットは補助表示
-// Main window: capture mode buttons are primary; shortcuts are shown as hints
+// ショートカットチップをクリックするとキーの組み合わせを録取して変更できる
+// Main window: capture mode buttons are primary; shortcuts are shown as hints.
+// Clicking a shortcut chip records a new key combination.
+
+type Settings = {
+  hotkeyRegion: string;
+  hotkeyWindow: string;
+  hotkeyFullscreen: string;
+};
+
+const DEFAULT_SETTINGS: Settings = {
+  hotkeyRegion: "PrintScreen",
+  hotkeyWindow: "Ctrl+PrintScreen",
+  hotkeyFullscreen: "Shift+PrintScreen",
+};
+
 const MODES = [
   {
     mode: "region",
+    key: "hotkeyRegion" as const,
     label: "矩形キャプチャ",
     description: "ドラッグで範囲を選択",
-    keys: "PrtSc",
     icon: "⬚",
   },
   {
     mode: "window",
+    key: "hotkeyWindow" as const,
     label: "ウィンドウキャプチャ",
     description: "前面のウィンドウを撮影",
-    keys: "Ctrl + PrtSc",
     icon: "🗔",
   },
   {
     mode: "fullscreen",
+    key: "hotkeyFullscreen" as const,
     label: "全画面キャプチャ",
     description: "カーソルのあるモニター全体",
-    keys: "Shift + PrtSc",
     icon: "🖵",
   },
 ];
 
+// 保存形式（例 "Ctrl+KeyA"）→ 表示形式（"Ctrl + A"） / Stored combo → friendly display
+const ARROWS: Record<string, string> = {
+  ArrowUp: "↑",
+  ArrowDown: "↓",
+  ArrowLeft: "←",
+  ArrowRight: "→",
+};
+function prettyHotkey(combo: string): string {
+  if (!combo) return "なし";
+  return combo
+    .split("+")
+    .map((part) => {
+      if (part === "PrintScreen") return "PrtSc";
+      if (part === "Super") return "Win";
+      if (part.startsWith("Key")) return part.slice(3);
+      if (part.startsWith("Digit")) return part.slice(5);
+      if (part in ARROWS) return ARROWS[part];
+      return part;
+    })
+    .join(" + ");
+}
+
+// キーイベント→保存形式（W3Cコード名）。修飾キー単体はnull
+// Key event → stored combo (W3C code names); bare modifiers yield null
+const MODIFIER_CODES = new Set([
+  "ControlLeft",
+  "ControlRight",
+  "ShiftLeft",
+  "ShiftRight",
+  "AltLeft",
+  "AltRight",
+  "MetaLeft",
+  "MetaRight",
+]);
+function comboFromEvent(e: KeyboardEvent): string | null {
+  if (!e.code || MODIFIER_CODES.has(e.code)) return null;
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push("Ctrl");
+  if (e.shiftKey) mods.push("Shift");
+  if (e.altKey) mods.push("Alt");
+  if (e.metaKey) mods.push("Super");
+  return [...mods, e.code].join("+");
+}
+
 function Home() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [recording, setRecording] = useState<keyof Settings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<Settings>("get_settings")
+      .then(setSettings)
+      .catch(() => setSettings(DEFAULT_SETTINGS));
+  }, []);
+
+  const applyHotkeys = useCallback(async (next: Settings) => {
+    try {
+      await invoke("set_hotkeys", { settings: next });
+      setSettings(next);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+      // 失敗時はバックエンドが旧設定へ戻している / Backend already rolled back
+      await invoke("resume_hotkeys").catch(() => {});
+    }
+  }, []);
+
+  // 録取中のキーイベント / Key capture while recording
+  useEffect(() => {
+    if (!recording || !settings) return;
+    const finish = (combo: string | null) => {
+      setRecording(null);
+      if (combo) {
+        applyHotkeys({ ...settings, [recording]: combo });
+      } else {
+        invoke("resume_hotkeys").catch(() => {});
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      if (e.code === "Escape") return finish(null);
+      const combo = comboFromEvent(e);
+      if (combo) finish(combo);
+    };
+    // PrintScreenはkeydownが発火しない環境があるためkeyupでも拾う
+    // Some environments fire only keyup for PrintScreen
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "PrintScreen") {
+        e.preventDefault();
+        finish(comboFromEvent(e));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [recording, settings, applyHotkeys]);
+
+  const startRecording = (key: keyof Settings) => {
+    setError(null);
+    setRecording(key);
+    // 録取中の誤発火を防ぐ / Avoid firing global hotkeys mid-recording
+    invoke("suspend_hotkeys").catch(() => {});
+  };
+
   return (
     <main className="flex h-screen w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
       <header className="flex items-baseline justify-between">
@@ -38,29 +160,57 @@ function Home() {
 
       <section className="flex flex-col gap-2">
         {MODES.map((m) => (
-          <button
+          <div
             key={m.mode}
-            onClick={() => invoke("start_capture", { mode: m.mode })}
-            className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 text-left transition-colors hover:bg-zinc-700"
+            className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 transition-colors hover:bg-zinc-700"
           >
-            <span className="text-2xl text-amber-400">{m.icon}</span>
-            <span className="flex-1">
-              <span className="block text-sm font-semibold">{m.label}</span>
-              <span className="block text-xs text-zinc-400">{m.description}</span>
-            </span>
-            <kbd className="rounded bg-zinc-700 px-2 py-1 font-mono text-[10px] text-amber-300 group-hover:bg-zinc-600">
-              {m.keys}
-            </kbd>
-          </button>
+            <button
+              onClick={() => invoke("start_capture", { mode: m.mode })}
+              className="flex flex-1 items-center gap-3 text-left"
+            >
+              <span className="text-2xl text-amber-400">{m.icon}</span>
+              <span className="flex-1">
+                <span className="block text-sm font-semibold">{m.label}</span>
+                <span className="block text-xs text-zinc-400">{m.description}</span>
+              </span>
+            </button>
+            <button
+              onClick={() => startRecording(m.key)}
+              title="クリックしてショートカットを変更"
+              className={`rounded px-2 py-1 font-mono text-[10px] transition-colors ${
+                recording === m.key
+                  ? "bg-amber-400 text-zinc-900"
+                  : "bg-zinc-700 text-amber-300 hover:bg-zinc-600"
+              }`}
+            >
+              {recording === m.key ? "キーを入力…" : settings ? prettyHotkey(settings[m.key]) : "…"}
+            </button>
+          </div>
         ))}
       </section>
 
-      <button
-        onClick={() => invoke("open_history_dir")}
-        className="mt-auto rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-amber-400 hover:text-amber-300"
-      >
-        履歴フォルダを開く
-      </button>
+      {recording && (
+        <p className="text-xs text-zinc-400">
+          設定したいキーの組み合わせを押してください（Escでキャンセル）
+        </p>
+      )}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      <div className="mt-auto flex items-center gap-2">
+        <button
+          onClick={() => invoke("open_history_dir")}
+          className="flex-1 rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-amber-400 hover:text-amber-300"
+        >
+          履歴フォルダを開く
+        </button>
+        <button
+          onClick={() => applyHotkeys(DEFAULT_SETTINGS)}
+          title="ショートカットを初期設定に戻す"
+          className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+        >
+          既定に戻す
+        </button>
+      </div>
     </main>
   );
 }
