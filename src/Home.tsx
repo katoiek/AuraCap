@@ -7,6 +7,7 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 // Main window: capture buttons are primary. The ⚙ settings view configures hotkeys & codegen.
 
 type Settings = {
+  closeToTray: boolean;
   hotkeysEnabled: boolean;
   hotkeyRegion: string;
   hotkeyWindow: string;
@@ -18,6 +19,7 @@ type Settings = {
 };
 
 const DEFAULT_SETTINGS: Settings = {
+  closeToTray: true,
   hotkeysEnabled: true,
   hotkeyRegion: "PrintScreen",
   hotkeyWindow: "Ctrl+PrintScreen",
@@ -108,13 +110,28 @@ function Home() {
   // Ollamaのインストール済みモデル一覧（null=未取得/取得失敗） / Installed Ollama models (null = not loaded / failed)
   const [ollamaModels, setOllamaModels] = useState<string[] | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
+  // ログオン時の自動起動（プラグインのレジストリ状態を直接読む） / Auto-launch state (read from the plugin)
+  const [autostart, setAutostart] = useState(false);
   const settingsRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     invoke<Settings>("get_settings")
       .then(setSettings)
       .catch(() => setSettings(DEFAULT_SETTINGS));
+    invoke<boolean>("get_autostart")
+      .then(setAutostart)
+      .catch(() => {});
   }, []);
+
+  const toggleAutostart = useCallback(async () => {
+    const next = !autostart;
+    try {
+      await invoke("set_autostart", { enabled: next });
+      setAutostart(next);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [autostart]);
 
   const applySettings = useCallback(async (next: Settings) => {
     try {
@@ -304,6 +321,54 @@ function Home() {
         </button>
         <h1 className="text-base font-bold tracking-wide">設定</h1>
       </header>
+
+      {/* 全般 / General */}
+      <section className="flex flex-col gap-2">
+        <span className="text-sm font-semibold">全般</span>
+
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-zinc-300">ログオン時に自動起動</span>
+          <button
+            onClick={toggleAutostart}
+            role="switch"
+            aria-checked={autostart}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+              autostart ? "bg-amber-400" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-all ${
+                autostart ? "left-6" : "left-1"
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-zinc-300">✕ボタンでトレイに常駐</span>
+          <button
+            onClick={() =>
+              settings && applySettings({ ...settings, closeToTray: !settings.closeToTray })
+            }
+            role="switch"
+            aria-checked={settings?.closeToTray ?? true}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+              settings?.closeToTray ? "bg-amber-400" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-all ${
+                settings?.closeToTray ? "left-6" : "left-1"
+              }`}
+            />
+          </button>
+        </div>
+        <p className="text-xs text-zinc-500">
+          オン: ✕で閉じてもトレイに常駐します。オフ: ✕でアプリを終了します。
+        </p>
+      </section>
+
+      <div className="h-px bg-zinc-800" />
 
       {/* ホットキー設定 / Hotkey settings */}
       <section className="flex flex-col gap-2">

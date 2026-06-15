@@ -92,6 +92,25 @@ fn resume_hotkeys(app: AppHandle) {
     let _ = apply_hotkeys(&app, &current);
 }
 
+// ---- 自動起動（ログオン時） / Auto-launch at login ----
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())
+    } else {
+        manager.disable().map_err(|e| e.to_string())
+    }
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let capture_region = MenuItem::with_id(app, "capture_region", "矩形キャプチャ", true, None::<&str>)?;
     let capture_window = MenuItem::with_id(app, "capture_window", "ウィンドウキャプチャ", true, None::<&str>)?;
@@ -166,6 +185,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // ログオン時の自動起動。引数なしで通常起動（トレイ常駐）
+        // Auto-launch at login; no args (starts normally and lives in the tray)
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(capture::SessionState::default())
         .manage(capture::UiInitiated::default())
         .manage(editor::EditorImage::default())
@@ -274,6 +299,8 @@ pub fn run() {
             save_settings,
             suspend_hotkeys,
             resume_hotkeys,
+            get_autostart,
+            set_autostart,
             frontend_log
         ])
         .on_window_event(|window, event| {
@@ -282,8 +309,19 @@ pub fn run() {
             match window.label() {
                 "main" => {
                     if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = window.hide();
+                        let app = window.app_handle();
+                        // 設定に応じて：トレイ常駐（隠す）か、アプリ終了か
+                        // Per setting: hide to tray, or quit the app
+                        let close_to_tray = app
+                            .try_state::<settings::SettingsState>()
+                            .map(|s| s.0.lock().unwrap().close_to_tray)
+                            .unwrap_or(true);
+                        if close_to_tray {
+                            api.prevent_close();
+                            let _ = window.hide();
+                        } else {
+                            app.exit(0);
+                        }
                     }
                 }
                 "editor" => {

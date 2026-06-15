@@ -14,6 +14,9 @@ use tauri::{AppHandle, Manager};
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// ✕ボタンの動作。true=トレイに常駐（隠す）/ false=アプリを終了
+    /// Close-button behavior. true = hide to tray, false = quit the app
+    pub close_to_tray: bool,
     /// グローバルホットキーを使うか（OFFなら一切登録しない＝他アプリと競合しない）
     /// Whether to use global hotkeys (OFF registers none, avoiding conflicts)
     pub hotkeys_enabled: bool,
@@ -34,6 +37,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            close_to_tray: true,
             hotkeys_enabled: true,
             hotkey_region: "PrintScreen".into(),
             hotkey_window: "Ctrl+PrintScreen".into(),

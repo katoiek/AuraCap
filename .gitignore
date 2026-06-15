@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# モバイル用アイコン（AuraCapはWindows専用） / Mobile icons (AuraCap is Windows-only)
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
