@@ -66,7 +66,10 @@ function Editor() {
   const [redacting, setRedacting] = useState(false);
   // Screenshot-to-Code: 生成中フラグと生成結果 / Codegen in-flight flag and result
   const [generating, setGenerating] = useState(false);
-  const [genCode, setGenCode] = useState<string | null>(null);
+  // 結果モーダル（コード生成・テキスト抽出で共用） / Result modal (shared by codegen & text extraction)
+  const [resultModal, setResultModal] = useState<{ title: string; text: string } | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const modalTextRef = useRef<HTMLTextAreaElement | null>(null);
   // 生成経過秒数（ローカルLLMは数分かかるため進行が見えるように）
   // Elapsed seconds; local LLMs can take minutes, so show progress
   const [genElapsed, setGenElapsed] = useState(0);
@@ -457,7 +460,7 @@ function Editor() {
       clearTimeout(timeoutId);
       // コードフェンス付きで返ってきた場合は剥がす / Strip code fences if present
       code = code.replace(/^```[a-z]*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
-      setGenCode(code || "（出力が空でした）");
+      setResultModal({ title: "生成されたHTML（Tailwind CSS）", text: code || "（出力が空でした）" });
     } catch (e) {
       const message =
         e instanceof DOMException && e.name === "AbortError"
@@ -469,6 +472,30 @@ function Editor() {
       setGenerating(false);
     }
   }, [generating, renderToPng, showToast]);
+
+  // テキスト抽出: ローカルOCRで画像内の文字を読み取りモーダルに表示する
+  // Text extraction: read on-image text with local OCR and show it in the modal
+  const runExtractText = useCallback(async () => {
+    if (extracting) return;
+    setExtracting(true);
+    try {
+      // トリミング範囲があればその矩形だけOCR、なければ全体 / OCR the crop region if set, else the whole image
+      const rect = cropRef.current
+        ? { x: cropRef.current.x, y: cropRef.current.y, w: cropRef.current.w, h: cropRef.current.h }
+        : null;
+      const text = await invoke<string>("extract_text", { rect });
+      if (!text.trim()) {
+        showToast("テキストが見つかりませんでした");
+      } else {
+        setResultModal({ title: "抽出されたテキスト", text });
+      }
+    } catch (e) {
+      showToast(`テキスト抽出に失敗しました: ${String(e).slice(0, 120)}`);
+      invoke("frontend_log", { message: `extract_text failed: ${e}` });
+    } finally {
+      setExtracting(false);
+    }
+  }, [extracting, showToast]);
 
   // ---- キーボード / Keyboard ----
   useEffect(() => {
@@ -764,6 +791,15 @@ function Editor() {
         >
           {redacting ? "検出中…" : "🛡 自動マスク"}
         </button>
+        {/* テキスト抽出（ローカルOCR） / Text extraction (local OCR) */}
+        <button
+          onClick={runExtractText}
+          disabled={extracting}
+          title="画像内の文字をOCRで読み取ってコピーできます（ローカル処理、外部送信なし）"
+          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {extracting ? "抽出中…" : "📋 テキスト抽出"}
+        </button>
         {/* Screenshot-to-Code（Claude API） */}
         <button
           onClick={runCodegen}
@@ -1020,33 +1056,43 @@ function Editor() {
         </div>
       )}
 
-      {/* 生成コードのモーダル / Generated-code modal */}
-      {genCode !== null && (
+      {/* 結果モーダル（コード生成・テキスト抽出で共用） / Result modal (codegen & text extraction) */}
+      {resultModal !== null && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6">
-          <div className="flex max-h-full w-full max-w-3xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
+          <div className="flex h-[80vh] max-h-full w-full max-w-3xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
             <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
-              <h2 className="text-sm font-semibold">生成されたHTML（Tailwind CSS）</h2>
+              <h2 className="text-sm font-semibold">{resultModal.title}</h2>
               <div className="flex gap-1.5">
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(genCode);
-                    showToast("コードをコピーしました");
+                    // 選択範囲があればそれを、なければ全文をコピー
+                    // Copy the selection if any, otherwise the whole text
+                    const ta = modalTextRef.current;
+                    const sel = ta ? ta.value.substring(ta.selectionStart, ta.selectionEnd) : "";
+                    const toCopy = sel || ta?.value || resultModal.text;
+                    navigator.clipboard.writeText(toCopy);
+                    showToast(sel ? "選択範囲をコピーしました" : "コピーしました");
                   }}
                   className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
                 >
                   コピー
                 </button>
                 <button
-                  onClick={() => setGenCode(null)}
+                  onClick={() => setResultModal(null)}
                   className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
                 >
                   閉じる
                 </button>
               </div>
             </div>
-            <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-4 text-xs leading-relaxed text-zinc-300">
-              {genCode}
-            </pre>
+            {/* 編集・選択できるテキストエリア（部分選択コピー用） / Editable, selectable area for partial-copy */}
+            <textarea
+              ref={modalTextRef}
+              key={`${resultModal.title}:${resultModal.text.length}`}
+              defaultValue={resultModal.text}
+              spellCheck={false}
+              className="min-h-0 flex-1 resize-none overflow-auto bg-transparent p-4 font-mono text-xs leading-relaxed text-zinc-300 focus:outline-none"
+            />
           </div>
         </div>
       )}

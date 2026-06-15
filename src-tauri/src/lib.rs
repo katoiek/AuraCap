@@ -294,6 +294,7 @@ pub fn run() {
             editor::export_copy,
             editor::export_save,
             redact::detect_sensitive,
+            redact::extract_text,
             open_history_dir,
             get_settings,
             save_settings,
