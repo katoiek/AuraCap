@@ -67,6 +67,15 @@ function Editor() {
   // Screenshot-to-Code: 生成中フラグと生成結果 / Codegen in-flight flag and result
   const [generating, setGenerating] = useState(false);
   const [genCode, setGenCode] = useState<string | null>(null);
+  // 生成経過秒数（ローカルLLMは数分かかるため進行が見えるように）
+  // Elapsed seconds; local LLMs can take minutes, so show progress
+  const [genElapsed, setGenElapsed] = useState(0);
+  useEffect(() => {
+    if (!generating) return;
+    setGenElapsed(0);
+    const t = setInterval(() => setGenElapsed((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [generating]);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -282,9 +291,9 @@ function Editor() {
     return new Uint8Array(await blob.arrayBuffer());
   }, [objects, crop, imgSize, stroke, fontSize, badgeR, blurPx]);
 
-  const showToast = useCallback((message: string) => {
+  const showToast = useCallback((message: string, ms = 1800) => {
     setToast(message);
-    setTimeout(() => setToast(null), 1800);
+    setTimeout(() => setToast(null), ms);
   }, []);
 
   const doCopy = useCallback(async () => {
@@ -336,23 +345,40 @@ function Editor() {
     }
   }, [redacting, pushUndo, showToast]);
 
-  // Screenshot-to-Code: 編集後の画像をClaude APIへ送り、Tailwind単一HTMLを生成する
-  // Screenshot-to-Code: send the edited image to the Claude API for a single-file Tailwind HTML
+  // Screenshot-to-Code: 編集後の画像から単一HTMLを生成する（Claude API / ローカルOllama）
+  // Screenshot-to-Code: generate a single-file HTML from the edited image (Claude API / local Ollama)
   const runCodegen = useCallback(async () => {
     if (generating) return;
     try {
-      const settings = await invoke<{ anthropicApiKey: string }>("get_settings");
+      const settings = await invoke<{
+        anthropicApiKey: string;
+        codegenProvider: string;
+        ollamaUrl: string;
+        ollamaModel: string;
+      }>("get_settings");
+      const provider = settings.codegenProvider === "ollama" ? "ollama" : "claude";
       const apiKey = settings.anthropicApiKey?.trim();
-      if (!apiKey) {
+      const ollamaModel = settings.ollamaModel?.trim();
+      if (provider === "claude" && !apiKey) {
         showToast("メイン画面でClaude APIキーを設定してください");
+        return;
+      }
+      if (provider === "ollama" && !ollamaModel) {
+        showToast("メイン画面でOllamaのモデル名を設定してください");
         return;
       }
       const png = await renderToPng();
       if (!png) return;
       setGenerating(true);
+      invoke("frontend_log", {
+        message: `codegen start: provider=${provider} model=${provider === "ollama" ? ollamaModel : "claude-fable-5"}`,
+      });
+      // ハング対策の上限時間 / Hard cap against hangs
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 600_000);
 
-      // APIの画像上限（8000px）に収まるよう縮小し、サイズ削減のためJPEG化
-      // Downscale within the API's 8000px image limit; JPEG to keep the payload small
+      // 画像上限（Claudeは8000px）に収まるよう縮小し、サイズ削減のためJPEG化
+      // Downscale within the image limit (8000px for Claude); JPEG keeps the payload small
       const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
       const k = Math.min(1, 7800 / Math.max(bitmap.width, bitmap.height));
       const canvas = document.createElement("canvas");
@@ -363,52 +389,81 @@ function Editor() {
       const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
       const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
 
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          // WebViewから直接呼ぶための明示オプトイン / Explicit opt-in for direct browser calls
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: "claude-fable-5",
-          max_tokens: 16000,
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "image",
-                  source: { type: "base64", media_type: "image/jpeg", data: base64 },
-                },
-                {
-                  type: "text",
-                  text:
-                    "このUIスクリーンショットを、Tailwind CSS（CDN版）を使った単一のHTMLファイルとして忠実に再現してください。" +
-                    "レイアウト・配色・余白・フォントサイズをできるだけ正確に。写真やイラスト部分はプレースホルダーで構いません。" +
-                    "完全なHTMLコードのみを出力してください（説明文・コードフェンスは不要）。",
-                },
-              ],
-            },
-          ],
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`API ${res.status}: ${body.slice(0, 200)}`);
+      const prompt =
+        "このUIスクリーンショットを、Tailwind CSS（CDN版）を使った単一のHTMLファイルとして忠実に再現してください。" +
+        "レイアウト・配色・余白・フォントサイズをできるだけ正確に。写真やイラスト部分はプレースホルダーで構いません。" +
+        "完全なHTMLコードのみを出力してください（説明文・コードフェンスは不要）。";
+
+      let code: string;
+      if (provider === "ollama") {
+        // OllamaネイティブAPI。完全ローカル・無料（要: ビジョン対応モデル）
+        // Ollama's native API; fully local & free (needs a vision-capable model)
+        const url = (settings.ollamaUrl?.trim() || "http://127.0.0.1:11434").replace(/\/+$/, "");
+        const res = await fetch(`${url}/api/chat`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: ollamaModel,
+            stream: false,
+            messages: [{ role: "user", content: prompt, images: [base64] }],
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`Ollama ${res.status}: ${body.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        code = data.message?.content ?? "";
+      } else {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            // WebViewから直接呼ぶための明示オプトイン / Explicit opt-in for direct browser calls
+            "anthropic-dangerous-direct-browser-access": "true",
+          },
+          body: JSON.stringify({
+            model: "claude-fable-5",
+            max_tokens: 16000,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image",
+                    source: { type: "base64", media_type: "image/jpeg", data: base64 },
+                  },
+                  { type: "text", text: prompt },
+                ],
+              },
+            ],
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`API ${res.status}: ${body.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        code = (data.content ?? [])
+          .filter((b: { type: string }) => b.type === "text")
+          .map((b: { text: string }) => b.text)
+          .join("\n");
       }
-      const data = await res.json();
-      let code: string = (data.content ?? [])
-        .filter((b: { type: string }) => b.type === "text")
-        .map((b: { text: string }) => b.text)
-        .join("\n");
+
+      clearTimeout(timeoutId);
       // コードフェンス付きで返ってきた場合は剥がす / Strip code fences if present
       code = code.replace(/^```[a-z]*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
       setGenCode(code || "（出力が空でした）");
     } catch (e) {
-      showToast(`コード生成に失敗しました: ${String(e).slice(0, 120)}`);
+      const message =
+        e instanceof DOMException && e.name === "AbortError"
+          ? "コード生成がタイムアウトしました（10分）。モデルやマシン負荷を確認してください"
+          : `コード生成に失敗しました: ${String(e).slice(0, 160)}`;
+      showToast(message, 6000);
       invoke("frontend_log", { message: `codegen failed: ${e}` });
     } finally {
       setGenerating(false);
@@ -716,7 +771,7 @@ function Editor() {
           title="このスクリーンショットからTailwind CSSのHTMLを生成します（Claude API使用）"
           className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
         >
-          {generating ? "生成中…" : "⧉ コード生成"}
+          {generating ? `生成中… ${genElapsed}s` : "⧉ コード生成"}
         </button>
         <div className="mx-2 h-6 w-px bg-zinc-700" />
         {/* 表示ズーム / Display zoom */}

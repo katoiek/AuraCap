@@ -20,6 +20,12 @@ pub struct Settings {
     /// Screenshot-to-Code用のClaude APIキー（ローカル保存・個人用ツールの割り切り）
     /// Claude API key for Screenshot-to-Code (stored locally; personal-tool tradeoff)
     pub anthropic_api_key: String,
+    /// コード生成エンジン: "claude" または "ollama" / Codegen engine: "claude" or "ollama"
+    pub codegen_provider: String,
+    /// OllamaのエンドポイントURL / Ollama endpoint URL
+    pub ollama_url: String,
+    /// Ollamaのビジョン対応モデル名 / Ollama vision-capable model name
+    pub ollama_model: String,
 }
 
 impl Default for Settings {
@@ -29,6 +35,9 @@ impl Default for Settings {
             hotkey_window: "Ctrl+PrintScreen".into(),
             hotkey_fullscreen: "Shift+PrintScreen".into(),
             anthropic_api_key: String::new(),
+            codegen_provider: "claude".into(),
+            ollama_url: "http://127.0.0.1:11434".into(),
+            ollama_model: "qwen2.5vl".into(),
         }
     }
 }

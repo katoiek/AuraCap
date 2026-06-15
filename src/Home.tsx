@@ -11,6 +11,9 @@ type Settings = {
   hotkeyWindow: string;
   hotkeyFullscreen: string;
   anthropicApiKey: string;
+  codegenProvider: string; // "claude" | "ollama"
+  ollamaUrl: string;
+  ollamaModel: string;
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -18,6 +21,9 @@ const DEFAULT_SETTINGS: Settings = {
   hotkeyWindow: "Ctrl+PrintScreen",
   hotkeyFullscreen: "Shift+PrintScreen",
   anthropicApiKey: "",
+  codegenProvider: "claude",
+  ollamaUrl: "http://127.0.0.1:11434",
+  ollamaModel: "qwen2.5vl",
 };
 
 const MODES = [
@@ -92,8 +98,8 @@ function Home() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [recording, setRecording] = useState<keyof Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // APIキー入力の下書き（nullなら未編集） / API key draft (null = untouched)
-  const [keyDraft, setKeyDraft] = useState<string | null>(null);
+  // テキスト設定の下書き（nullなら未編集） / Text-settings draft (null = untouched)
+  const [draft, setDraft] = useState<Partial<Settings> | null>(null);
 
   useEffect(() => {
     invoke<Settings>("get_settings")
@@ -202,31 +208,70 @@ function Home() {
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
 
-      {/* Screenshot-to-Code用のClaude APIキー / Claude API key for Screenshot-to-Code */}
-      <div className="flex items-center gap-2">
-        <label className="shrink-0 text-xs text-zinc-400" htmlFor="api-key">
-          Claude APIキー
-        </label>
-        <input
-          id="api-key"
-          type="password"
-          placeholder="sk-ant-…（コード生成に使用）"
-          value={keyDraft ?? settings?.anthropicApiKey ?? ""}
-          onChange={(e) => setKeyDraft(e.target.value)}
-          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
-        />
-        {keyDraft !== null && (
-          <button
-            onClick={async () => {
-              if (!settings) return;
-              if (await applySettings({ ...settings, anthropicApiKey: keyDraft.trim() })) {
-                setKeyDraft(null);
-              }
-            }}
-            className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+      {/* Screenshot-to-Codeの生成エンジン設定 / Codegen engine settings */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <label className="shrink-0 text-xs text-zinc-400" htmlFor="codegen-provider">
+            コード生成
+          </label>
+          <select
+            id="codegen-provider"
+            value={settings?.codegenProvider ?? "claude"}
+            onChange={(e) =>
+              settings && applySettings({ ...settings, codegenProvider: e.target.value })
+            }
+            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
           >
-            保存
-          </button>
+            <option value="claude">Claude API</option>
+            <option value="ollama">Ollama（ローカル）</option>
+          </select>
+          {(settings?.codegenProvider ?? "claude") === "claude" ? (
+            <input
+              type="password"
+              placeholder="sk-ant-…（APIキー）"
+              value={draft?.anthropicApiKey ?? settings?.anthropicApiKey ?? ""}
+              onChange={(e) => setDraft((d) => ({ ...d, anthropicApiKey: e.target.value }))}
+              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+            />
+          ) : (
+            <input
+              type="text"
+              placeholder="モデル名（例: qwen2.5vl）"
+              value={draft?.ollamaModel ?? settings?.ollamaModel ?? ""}
+              onChange={(e) => setDraft((d) => ({ ...d, ollamaModel: e.target.value }))}
+              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+            />
+          )}
+          {draft !== null && (
+            <button
+              onClick={async () => {
+                if (!settings) return;
+                const next = { ...settings, ...draft };
+                next.anthropicApiKey = next.anthropicApiKey.trim();
+                next.ollamaModel = next.ollamaModel.trim();
+                next.ollamaUrl = next.ollamaUrl.trim() || DEFAULT_SETTINGS.ollamaUrl;
+                if (await applySettings(next)) setDraft(null);
+              }}
+              className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+            >
+              保存
+            </button>
+          )}
+        </div>
+        {(settings?.codegenProvider ?? "claude") === "ollama" && (
+          <div className="flex items-center gap-2">
+            <label className="shrink-0 text-xs text-zinc-400" htmlFor="ollama-url">
+              Ollama URL
+            </label>
+            <input
+              id="ollama-url"
+              type="text"
+              placeholder="http://127.0.0.1:11434"
+              value={draft?.ollamaUrl ?? settings?.ollamaUrl ?? ""}
+              onChange={(e) => setDraft((d) => ({ ...d, ollamaUrl: e.target.value }))}
+              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+            />
+          </div>
         )}
       </div>
 
