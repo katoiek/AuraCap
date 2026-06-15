@@ -139,9 +139,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => app.exit(0),
-            "capture_region" => capture::start_capture(app.clone(), "region".into()),
-            "capture_window" => capture::start_capture(app.clone(), "window".into()),
-            "capture_fullscreen" => capture::start_capture(app.clone(), "fullscreen".into()),
+            "capture_region" => capture::start_capture(app.clone(), "region".into(), None),
+            "capture_window" => capture::start_capture(app.clone(), "window".into(), None),
+            "capture_fullscreen" => capture::start_capture(app.clone(), "fullscreen".into(), None),
             "open_history" => {
                 let _ = open_history_dir(app.clone());
             }

@@ -513,7 +513,10 @@ fn cursor_pos() -> Result<(i32, i32), AnyError> {
 /// Capture initiated from the UI (buttons / tray menu).
 /// The main window is hidden first so it does not appear in the capture.
 #[tauri::command]
-pub fn start_capture(app: AppHandle, mode: String) {
+pub fn start_capture(app: AppHandle, mode: String, delay: Option<u32>) {
+    // 遅延（秒）。消えてしまうUI（メニュー・ツールチップ等）を撮るために撮影を遅らせる
+    // Delay (seconds) before the freeze, to capture transient UI (menus, tooltips, ...)
+    let delay = delay.unwrap_or(0);
     let was_visible = app
         .get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
@@ -530,6 +533,9 @@ pub fn start_capture(app: AppHandle, mode: String) {
         if was_visible {
             // ウィンドウが画面合成から消えるのを待つ / Wait for the window to leave composition
             std::thread::sleep(Duration::from_millis(250));
+        }
+        if delay > 0 {
+            std::thread::sleep(Duration::from_secs(delay as u64));
         }
         match mode.as_str() {
             "region" => start_overlay_capture(&app, CaptureMode::Region),

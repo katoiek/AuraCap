@@ -112,6 +112,8 @@ function Home() {
   const [loadingModels, setLoadingModels] = useState(false);
   // ログオン時の自動起動（プラグインのレジストリ状態を直接読む） / Auto-launch state (read from the plugin)
   const [autostart, setAutostart] = useState(false);
+  // 撮影遅延（秒）。消えるUIを撮るため。セッション内の一時選択 / Capture delay (sec) for transient UI
+  const [delay, setDelay] = useState(0);
   const settingsRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -273,11 +275,34 @@ function Home() {
           </div>
         </header>
 
+        {/* 撮影遅延セレクタ / Capture delay selector */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-zinc-400">遅延</span>
+          <div className="flex gap-1">
+            {[0, 3, 5].map((d) => (
+              <button
+                key={d}
+                onClick={() => setDelay(d)}
+                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+                  delay === d
+                    ? "bg-amber-400 font-semibold text-zinc-900"
+                    : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+                }`}
+              >
+                {d === 0 ? "なし" : `${d}秒`}
+              </button>
+            ))}
+          </div>
+          {delay > 0 && (
+            <span className="text-xs text-zinc-500">撮影まで{delay}秒待ちます</span>
+          )}
+        </div>
+
         <section className="flex flex-col gap-2">
           {MODES.map((m) => (
             <button
               key={m.mode}
-              onClick={() => invoke("start_capture", { mode: m.mode })}
+              onClick={() => invoke("start_capture", { mode: m.mode, delay })}
               className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 text-left transition-colors hover:bg-zinc-700"
             >
               <span className="text-2xl text-amber-400">{m.icon}</span>
