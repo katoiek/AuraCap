@@ -9,4 +9,7 @@ body,
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* 自動リサイズ時にコンテンツ外へ出る余白を白でなくダークにする
+     Keep any area outside the content dark (not white) during auto-resize */
+  background: #18181b;
 }

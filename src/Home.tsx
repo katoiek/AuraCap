@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 
-// メインウィンドウ：キャプチャモードのボタンが主役、ショートカットは補助表示
-// ショートカットチップをクリックするとキーの組み合わせを録取して変更できる
-// Main window: capture mode buttons are primary; shortcuts are shown as hints.
-// Clicking a shortcut chip records a new key combination.
+// メインウィンドウ：キャプチャボタンが主役。設定（⚙）でホットキー・コード生成を構成する
+// Main window: capture buttons are primary. The ⚙ settings view configures hotkeys & codegen.
 
 type Settings = {
+  hotkeysEnabled: boolean;
   hotkeyRegion: string;
   hotkeyWindow: string;
   hotkeyFullscreen: string;
@@ -17,6 +18,7 @@ type Settings = {
 };
 
 const DEFAULT_SETTINGS: Settings = {
+  hotkeysEnabled: true,
   hotkeyRegion: "PrintScreen",
   hotkeyWindow: "Ctrl+PrintScreen",
   hotkeyFullscreen: "Shift+PrintScreen",
@@ -96,10 +98,17 @@ function comboFromEvent(e: KeyboardEvent): string | null {
 
 function Home() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [view, setView] = useState<"main" | "settings">("main");
   const [recording, setRecording] = useState<keyof Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ホットキー登録の警告（他アプリ使用中のキー） / Hotkey warnings (keys held by other apps)
+  const [hotkeyWarnings, setHotkeyWarnings] = useState<string[]>([]);
   // テキスト設定の下書き（nullなら未編集） / Text-settings draft (null = untouched)
   const [draft, setDraft] = useState<Partial<Settings> | null>(null);
+  // Ollamaのインストール済みモデル一覧（null=未取得/取得失敗） / Installed Ollama models (null = not loaded / failed)
+  const [ollamaModels, setOllamaModels] = useState<string[] | null>(null);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const settingsRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     invoke<Settings>("get_settings")
@@ -109,17 +118,43 @@ function Home() {
 
   const applySettings = useCallback(async (next: Settings) => {
     try {
-      await invoke("save_settings", { settings: next });
+      const warnings = await invoke<string[]>("save_settings", { settings: next });
       setSettings(next);
+      setHotkeyWarnings(Array.isArray(warnings) ? warnings : []);
       setError(null);
       return true;
     } catch (e) {
       setError(String(e));
-      // 失敗時はバックエンドが旧設定へ戻している / Backend already rolled back
-      await invoke("resume_hotkeys").catch(() => {});
       return false;
     }
   }, []);
+
+  // Ollamaの /api/tags からモデル一覧を取得する / Fetch the model list from Ollama's /api/tags
+  const fetchOllamaModels = useCallback(async (url: string) => {
+    setLoadingModels(true);
+    try {
+      const base = url.trim().replace(/\/+$/, "") || DEFAULT_SETTINGS.ollamaUrl;
+      const res = await fetch(`${base}/api/tags`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const data = await res.json();
+      const names: string[] = (data.models ?? [])
+        .map((m: { name: string }) => m.name)
+        .sort((a: string, b: string) => a.localeCompare(b));
+      setOllamaModels(names);
+    } catch {
+      // 未起動・URL誤り等。手入力にフォールバックさせる / Not running / bad URL → fall back to manual entry
+      setOllamaModels(null);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, []);
+
+  // 設定画面でOllama選択中はモデル一覧を自動取得 / Auto-fetch models while Ollama is selected on the settings view
+  useEffect(() => {
+    if (view === "settings" && settings?.codegenProvider === "ollama") {
+      fetchOllamaModels(settings.ollamaUrl);
+    }
+  }, [view, settings?.codegenProvider, settings?.ollamaUrl, fetchOllamaModels]);
 
   // 録取中のキーイベント / Key capture while recording
   useEffect(() => {
@@ -161,138 +196,317 @@ function Home() {
     invoke("suspend_hotkeys").catch(() => {});
   };
 
-  return (
-    <main className="flex h-screen w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
-      <header className="flex items-baseline justify-between">
-        <h1 className="text-lg font-bold tracking-wide">
-          Aura<span className="text-amber-400">Cap</span>
-        </h1>
-        <p className="text-xs text-zinc-500">トレイ常駐中</p>
-      </header>
+  // 設定画面はコンテンツ高に合わせてウィンドウを縦リサイズ、メイン画面は既定サイズへ戻す
+  // The settings view resizes the window to fit its content height; main returns to default
+  useEffect(() => {
+    const win = getCurrentWindow();
+    if (view !== "settings") {
+      win.setSize(new LogicalSize(480, 360)).catch(() => {});
+      return;
+    }
+    const el = settingsRef.current;
+    if (!el) return;
+    let raf = 0;
+    const fit = async () => {
+      try {
+        // タイトルバー等のウィンドウ枠の高さ（CSS px）を実測して足し込む
+        // Measure the window chrome (title bar etc.) in CSS px and add it
+        const scale = await win.scaleFactor();
+        const outer = await win.outerSize();
+        const chrome = outer.height / scale - window.innerHeight;
+        const target = Math.min(Math.max(el.scrollHeight + chrome, 200), 1000);
+        await win.setSize(new LogicalSize(480, Math.ceil(target)));
+      } catch {
+        /* ウィンドウ操作不可時は無視 / Ignore when the window op is unavailable */
+      }
+    };
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(fit);
+    });
+    ro.observe(el);
+    fit();
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, [view]);
 
-      <section className="flex flex-col gap-2">
-        {MODES.map((m) => (
-          <div
-            key={m.mode}
-            className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 transition-colors hover:bg-zinc-700"
-          >
+  const provider = settings?.codegenProvider ?? "claude";
+
+  // ---- メイン画面 / Main view ----
+  if (view !== "settings") {
+    return (
+      <main className="flex h-screen w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
+        <header className="flex items-center justify-between">
+          <h1 className="text-lg font-bold tracking-wide">
+            Aura<span className="text-amber-400">Cap</span>
+          </h1>
+          <div className="flex items-center gap-2">
+            <p className="text-xs text-zinc-500">トレイ常駐中</p>
             <button
+              onClick={() => setView("settings")}
+              title="設定"
+              className="grid h-7 w-7 place-items-center rounded-lg bg-zinc-800 text-sm text-zinc-300 hover:bg-zinc-700"
+            >
+              ⚙
+            </button>
+          </div>
+        </header>
+
+        <section className="flex flex-col gap-2">
+          {MODES.map((m) => (
+            <button
+              key={m.mode}
               onClick={() => invoke("start_capture", { mode: m.mode })}
-              className="flex flex-1 items-center gap-3 text-left"
+              className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 text-left transition-colors hover:bg-zinc-700"
             >
               <span className="text-2xl text-amber-400">{m.icon}</span>
               <span className="flex-1">
                 <span className="block text-sm font-semibold">{m.label}</span>
                 <span className="block text-xs text-zinc-400">{m.description}</span>
               </span>
+              {settings?.hotkeysEnabled && (
+                <kbd className="rounded bg-zinc-700 px-2 py-1 font-mono text-[10px] text-amber-300 group-hover:bg-zinc-600">
+                  {prettyHotkey(settings[m.key])}
+                </kbd>
+              )}
             </button>
-            <button
-              onClick={() => startRecording(m.key)}
-              title="クリックしてショートカットを変更"
-              className={`rounded px-2 py-1 font-mono text-[10px] transition-colors ${
-                recording === m.key
-                  ? "bg-amber-400 text-zinc-900"
-                  : "bg-zinc-700 text-amber-300 hover:bg-zinc-600"
+          ))}
+        </section>
+
+        <button
+          onClick={() => invoke("open_history_dir")}
+          className="mt-auto rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-amber-400 hover:text-amber-300"
+        >
+          履歴フォルダを開く
+        </button>
+      </main>
+    );
+  }
+
+  // ---- 設定画面 / Settings view ----
+  // h-screenにせず自然高にして、その高さへウィンドウを合わせる（上のuseEffect）
+  // Natural height (no h-screen) so the window can be fit to it (see the effect above)
+  return (
+    <main ref={settingsRef} className="flex w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
+      <header className="flex items-center gap-2">
+        <button
+          onClick={() => {
+            setView("main");
+            setRecording(null);
+            setDraft(null);
+          }}
+          title="戻る"
+          className="grid h-7 w-7 place-items-center rounded-lg bg-zinc-800 text-sm text-zinc-300 hover:bg-zinc-700"
+        >
+          ←
+        </button>
+        <h1 className="text-base font-bold tracking-wide">設定</h1>
+      </header>
+
+      {/* ホットキー設定 / Hotkey settings */}
+      <section className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold">ホットキー</span>
+          <button
+            onClick={() =>
+              settings && applySettings({ ...settings, hotkeysEnabled: !settings.hotkeysEnabled })
+            }
+            role="switch"
+            aria-checked={settings?.hotkeysEnabled ?? false}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+              settings?.hotkeysEnabled ? "bg-amber-400" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-all ${
+                settings?.hotkeysEnabled ? "left-6" : "left-1"
               }`}
-            >
-              {recording === m.key ? "キーを入力…" : settings ? prettyHotkey(settings[m.key]) : "…"}
-            </button>
+            />
+          </button>
+        </div>
+        <p className="text-xs text-zinc-500">
+          グローバルショートカットでキャプチャを起動します。他アプリと競合する場合はオフにできます。
+        </p>
+
+        {settings?.hotkeysEnabled && (
+          <div className="flex flex-col gap-1.5">
+            {MODES.map((m) => (
+              <div key={m.mode} className="flex items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
+                <span className="text-xs text-zinc-300">{m.label}</span>
+                <button
+                  onClick={() => startRecording(m.key)}
+                  title="クリックしてショートカットを変更"
+                  className={`rounded px-2 py-1 font-mono text-[10px] transition-colors ${
+                    recording === m.key
+                      ? "bg-amber-400 text-zinc-900"
+                      : "bg-zinc-700 text-amber-300 hover:bg-zinc-600"
+                  }`}
+                >
+                  {recording === m.key ? "キーを入力…" : settings ? prettyHotkey(settings[m.key]) : "…"}
+                </button>
+              </div>
+            ))}
+            {recording && (
+              <p className="text-xs text-zinc-400">
+                設定したいキーの組み合わせを押してください（Escでキャンセル）
+              </p>
+            )}
+            {hotkeyWarnings.length > 0 && (
+              <p className="text-xs text-amber-400">
+                次のキーは他アプリが使用中のため無効です: {hotkeyWarnings.join("、")}
+                。別のキーに変更してください。
+              </p>
+            )}
           </div>
-        ))}
+        )}
       </section>
 
-      {recording && (
-        <p className="text-xs text-zinc-400">
-          設定したいキーの組み合わせを押してください（Escでキャンセル）
-        </p>
-      )}
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      <div className="h-px bg-zinc-800" />
 
-      {/* Screenshot-to-Codeの生成エンジン設定 / Codegen engine settings */}
-      <div className="flex flex-col gap-2">
+      {/* コード生成設定 / Codegen settings */}
+      <section className="flex flex-col gap-2">
+        <span className="text-sm font-semibold">コード生成（Screenshot-to-Code）</span>
+
         <div className="flex items-center gap-2">
-          <label className="shrink-0 text-xs text-zinc-400" htmlFor="codegen-provider">
-            コード生成
+          <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="codegen-provider">
+            エンジン
           </label>
           <select
             id="codegen-provider"
-            value={settings?.codegenProvider ?? "claude"}
-            onChange={(e) =>
-              settings && applySettings({ ...settings, codegenProvider: e.target.value })
-            }
-            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+            value={provider}
+            onChange={(e) => settings && applySettings({ ...settings, codegenProvider: e.target.value })}
+            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
           >
             <option value="claude">Claude API</option>
             <option value="ollama">Ollama（ローカル）</option>
           </select>
-          {(settings?.codegenProvider ?? "claude") === "claude" ? (
+        </div>
+
+        {provider === "claude" ? (
+          <div className="flex items-center gap-2">
+            <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="api-key">
+              APIキー
+            </label>
             <input
+              id="api-key"
               type="password"
-              placeholder="sk-ant-…（APIキー）"
+              placeholder="sk-ant-…"
               value={draft?.anthropicApiKey ?? settings?.anthropicApiKey ?? ""}
               onChange={(e) => setDraft((d) => ({ ...d, anthropicApiKey: e.target.value }))}
               className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
             />
-          ) : (
-            <input
-              type="text"
-              placeholder="モデル名（例: qwen2.5vl）"
-              value={draft?.ollamaModel ?? settings?.ollamaModel ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, ollamaModel: e.target.value }))}
-              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
-            />
-          )}
-          {draft !== null && (
-            <button
-              onClick={async () => {
-                if (!settings) return;
-                const next = { ...settings, ...draft };
-                next.anthropicApiKey = next.anthropicApiKey.trim();
-                next.ollamaModel = next.ollamaModel.trim();
-                next.ollamaUrl = next.ollamaUrl.trim() || DEFAULT_SETTINGS.ollamaUrl;
-                if (await applySettings(next)) setDraft(null);
-              }}
-              className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
-            >
-              保存
-            </button>
-          )}
-        </div>
-        {(settings?.codegenProvider ?? "claude") === "ollama" && (
-          <div className="flex items-center gap-2">
-            <label className="shrink-0 text-xs text-zinc-400" htmlFor="ollama-url">
-              Ollama URL
-            </label>
-            <input
-              id="ollama-url"
-              type="text"
-              placeholder="http://127.0.0.1:11434"
-              value={draft?.ollamaUrl ?? settings?.ollamaUrl ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, ollamaUrl: e.target.value }))}
-              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
-            />
+            {draft?.anthropicApiKey !== undefined && (
+              <button
+                onClick={async () => {
+                  if (!settings) return;
+                  if (await applySettings({ ...settings, anthropicApiKey: (draft.anthropicApiKey ?? "").trim() }))
+                    setDraft(null);
+                }}
+                className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+              >
+                保存
+              </button>
+            )}
           </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <label className="w-16 shrink-0 text-xs text-zinc-400">モデル</label>
+              {ollamaModels && ollamaModels.length > 0 ? (
+                // 一覧取得成功 → ドロップダウン（選択で即保存） / Models loaded → dropdown (saves on change)
+                <select
+                  value={settings?.ollamaModel ?? ""}
+                  onChange={(e) => settings && applySettings({ ...settings, ollamaModel: e.target.value })}
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+                >
+                  {settings?.ollamaModel && !ollamaModels.includes(settings.ollamaModel) && (
+                    <option value={settings.ollamaModel}>{settings.ollamaModel}（未インストール？）</option>
+                  )}
+                  {ollamaModels.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                // 一覧未取得（未起動等）→ 手入力にフォールバック / No list → manual entry
+                <input
+                  type="text"
+                  placeholder={loadingModels ? "モデル一覧を取得中…" : "モデル名（例: qwen2.5vl）"}
+                  value={draft?.ollamaModel ?? settings?.ollamaModel ?? ""}
+                  onChange={(e) => setDraft((d) => ({ ...d, ollamaModel: e.target.value }))}
+                  onBlur={async () => {
+                    if (settings && draft?.ollamaModel !== undefined) {
+                      if (await applySettings({ ...settings, ollamaModel: (draft.ollamaModel ?? "").trim() }))
+                        setDraft((d) => ({ ...d, ollamaModel: undefined }));
+                    }
+                  }}
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+                />
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="ollama-url">
+                URL
+              </label>
+              <input
+                id="ollama-url"
+                type="text"
+                placeholder="http://127.0.0.1:11434"
+                value={draft?.ollamaUrl ?? settings?.ollamaUrl ?? ""}
+                onChange={(e) => setDraft((d) => ({ ...d, ollamaUrl: e.target.value }))}
+                onBlur={async () => {
+                  if (settings && draft?.ollamaUrl !== undefined) {
+                    const url = (draft.ollamaUrl ?? "").trim() || DEFAULT_SETTINGS.ollamaUrl;
+                    if (await applySettings({ ...settings, ollamaUrl: url }))
+                      setDraft((d) => ({ ...d, ollamaUrl: undefined }));
+                  }
+                }}
+                className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+              />
+              <button
+                onClick={() => fetchOllamaModels(draft?.ollamaUrl ?? settings?.ollamaUrl ?? DEFAULT_SETTINGS.ollamaUrl)}
+                disabled={loadingModels}
+                title="モデル一覧を再取得"
+                className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-amber-400 hover:text-amber-300 disabled:opacity-50"
+              >
+                {loadingModels ? "…" : "🔄"}
+              </button>
+            </div>
+            {!loadingModels && ollamaModels === null && (
+              <p className="text-xs text-zinc-500">
+                Ollamaに接続できません。起動状態とURLを確認し🔄で再取得するか、モデル名を直接入力してください。
+              </p>
+            )}
+            {ollamaModels !== null && ollamaModels.length === 0 && (
+              <p className="text-xs text-zinc-500">
+                インストール済みモデルがありません（例: `ollama pull qwen2.5vl`）。
+              </p>
+            )}
+          </>
         )}
-      </div>
+      </section>
 
-      <div className="mt-auto flex items-center gap-2">
-        <button
-          onClick={() => invoke("open_history_dir")}
-          className="flex-1 rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-amber-400 hover:text-amber-300"
-        >
-          履歴フォルダを開く
-        </button>
-        <button
-          onClick={() =>
-            settings &&
-            applySettings({ ...DEFAULT_SETTINGS, anthropicApiKey: settings.anthropicApiKey })
-          }
-          title="ショートカットを初期設定に戻す"
-          className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
-        >
-          既定に戻す
-        </button>
-      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      <button
+        onClick={() =>
+          settings &&
+          applySettings({
+            ...settings,
+            hotkeysEnabled: DEFAULT_SETTINGS.hotkeysEnabled,
+            hotkeyRegion: DEFAULT_SETTINGS.hotkeyRegion,
+            hotkeyWindow: DEFAULT_SETTINGS.hotkeyWindow,
+            hotkeyFullscreen: DEFAULT_SETTINGS.hotkeyFullscreen,
+          })
+        }
+        title="ショートカットを初期設定に戻す（APIキー・Ollama設定は保持）"
+        className="mt-2 rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+      >
+        ショートカットを既定に戻す
+      </button>
     </main>
   );
 }

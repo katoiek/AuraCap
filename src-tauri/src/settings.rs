@@ -14,6 +14,9 @@ use tauri::{AppHandle, Manager};
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// グローバルホットキーを使うか（OFFなら一切登録しない＝他アプリと競合しない）
+    /// Whether to use global hotkeys (OFF registers none, avoiding conflicts)
+    pub hotkeys_enabled: bool,
     pub hotkey_region: String,
     pub hotkey_window: String,
     pub hotkey_fullscreen: String,
@@ -31,6 +34,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            hotkeys_enabled: true,
             hotkey_region: "PrintScreen".into(),
             hotkey_window: "Ctrl+PrintScreen".into(),
             hotkey_fullscreen: "Shift+PrintScreen".into(),

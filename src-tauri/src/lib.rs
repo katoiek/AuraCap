@@ -32,6 +32,11 @@ fn open_history_dir(app: AppHandle) -> Result<(), String> {
 fn apply_hotkeys(app: &AppHandle, settings: &settings::Settings) -> Vec<String> {
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
+    // ホットキー無効時は一切登録しない（他アプリとの競合を完全回避）
+    // When disabled, register nothing (fully avoids conflicts with other apps)
+    if !settings.hotkeys_enabled {
+        return Vec::new();
+    }
     let mut errors = Vec::new();
     for (name, keys) in [
         ("矩形", &settings.hotkey_region),
@@ -60,19 +65,18 @@ fn get_settings(state: tauri::State<'_, settings::SettingsState>) -> settings::S
     state.0.lock().unwrap().clone()
 }
 
-/// 設定を検証つきで適用・保存する。ホットキー登録に失敗したら元の設定へ戻す
-/// Apply & persist settings with validation; roll back hotkeys on failure
+/// 設定を保存し、ホットキーをベストエフォートで適用する。
+/// 保存は常に成功させ、登録できなかったキーの一覧（警告）を返す。
+/// 他アプリにキーを掴まれていても設定保存自体は失敗させない。
+/// Persist settings and apply hotkeys best-effort. The save always succeeds;
+/// returns the list of keys that could not be registered (warnings). A key held
+/// by another app must not block saving (e.g. API key / provider changes).
 #[tauri::command]
-fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<(), String> {
-    let errors = apply_hotkeys(&app, &settings);
-    if !errors.is_empty() {
-        let old = app.state::<settings::SettingsState>().0.lock().unwrap().clone();
-        let _ = apply_hotkeys(&app, &old);
-        return Err(format!("登録できないキーがあります: {}", errors.join("、")));
-    }
+fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<Vec<String>, String> {
     settings::save(&app, &settings)?;
+    let warnings = apply_hotkeys(&app, &settings);
     *app.state::<settings::SettingsState>().0.lock().unwrap() = settings;
-    Ok(())
+    Ok(warnings)
 }
 
 /// キー入力の録取中はグローバルホットキーを一時停止する（録取中の誤発火防止）
