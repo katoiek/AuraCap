@@ -350,6 +350,20 @@ function Editor() {
     }
   }, [renderToPng]);
 
+  // 付箋ピン留め：編集後の画像を最前面のフローティング窓としてデスクトップに貼る
+  // Pin the edited image to the desktop as an always-on-top floating window
+  const doPin = useCallback(async () => {
+    const png = await renderToPng();
+    if (!png) return;
+    try {
+      await invoke("pin_image", png);
+      showToast("デスクトップにピン留めしました");
+    } catch (e) {
+      showToast(`ピン留めに失敗しました: ${String(e).slice(0, 120)}`);
+      invoke("frontend_log", { message: `pin failed: ${e}` });
+    }
+  }, [renderToPng, showToast]);
+
   // Smart Redact: ローカルOCRで機密情報らしき領域を検出し、ぼかしとして追加する
   // Smart Redact: detect sensitive-looking regions with local OCR, add them as blurs
   const runRedact = useCallback(async () => {
@@ -868,6 +882,13 @@ function Editor() {
           ＋
         </button>
         <div className="ml-auto flex items-center gap-1.5">
+          <button
+            onClick={doPin}
+            className="rounded-lg bg-zinc-800 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-700"
+            title="デスクトップに常に最前面で貼り付け"
+          >
+            📌 ピン
+          </button>
           <button
             onClick={doCopy}
             className="rounded-lg bg-amber-400 px-3.5 py-1.5 text-sm font-semibold text-zinc-900 hover:bg-amber-300"

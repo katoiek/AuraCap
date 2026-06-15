@@ -4,6 +4,7 @@ mod bridge;
 mod capture;
 mod editor;
 mod history;
+mod pin;
 mod redact;
 mod settings;
 
@@ -194,6 +195,7 @@ pub fn run() {
         .manage(capture::SessionState::default())
         .manage(capture::UiInitiated::default())
         .manage(editor::EditorImage::default())
+        .manage(pin::PinState::default())
         // 凍結フレーム（無圧縮BMP）をメモリから直接WebViewへ配信する
         // Serve frozen frames (uncompressed BMP) to the webview straight from memory
         .register_uri_scheme_protocol("freeze", |ctx, request| {
@@ -241,6 +243,35 @@ pub fn run() {
                 None => tauri::http::Response::builder()
                     .status(404)
                     .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::new())
+                    .unwrap(),
+            }
+        })
+        // 付箋（ピン留め）画像をidごとに配信する / Serve pinned images by id
+        .register_uri_scheme_protocol("pin", |ctx, request| {
+            let app = ctx.app_handle();
+            let body: Option<Vec<u8>> = request
+                .uri()
+                .path()
+                .trim_start_matches('/')
+                .parse::<u32>()
+                .ok()
+                .and_then(|id| {
+                    app.state::<pin::PinState>()
+                        .images
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .cloned()
+                });
+            match body {
+                Some(bytes) => tauri::http::Response::builder()
+                    .header("Content-Type", "image/png")
+                    .header("Cache-Control", "no-store")
+                    .body(bytes)
+                    .unwrap(),
+                None => tauri::http::Response::builder()
+                    .status(404)
                     .body(Vec::new())
                     .unwrap(),
             }
@@ -295,6 +326,8 @@ pub fn run() {
             editor::export_save,
             redact::detect_sensitive,
             redact::extract_text,
+            pin::pin_image,
+            pin::edit_pin,
             open_history_dir,
             get_settings,
             save_settings,
@@ -329,6 +362,13 @@ pub fn run() {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
                         editor::hide_editor(window.app_handle());
+                    }
+                }
+                // 付箋は閉じたら破棄（使い捨て）。状態だけ掃除する
+                // Pins are disposable: let them close, just clean up the stored image
+                label if label.starts_with("pin-") => {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        pin::forget(window.app_handle(), label);
                     }
                 }
                 _ => {}
