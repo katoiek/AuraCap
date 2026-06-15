@@ -260,7 +260,9 @@ function Home() {
             Aura<span className="text-amber-400">Cap</span>
           </h1>
           <div className="flex items-center gap-2">
-            <p className="text-xs text-zinc-500">トレイ常駐中</p>
+            <p className="text-xs text-zinc-500">
+              {settings?.closeToTray ? "✕で常駐" : "✕で終了"}
+            </p>
             <button
               onClick={() => setView("settings")}
               title="設定"
