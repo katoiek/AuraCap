@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 
 // 軽量エディタ：出力までは全アノテーションを再編集可能なオブジェクトとして保持する
 // Quick editor: every annotation stays a re-editable object until export
@@ -83,6 +84,7 @@ function Editor() {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLElement | null>(null);
   const gesture = useRef<Gesture | null>(null);
   const undoStack = useRef<{ objects: Obj[]; crop: RectShape | null }[]>([]);
   const objectsRef = useRef(objects);
@@ -157,6 +159,34 @@ function Editor() {
     if (viewportRef.current) ro.observe(viewportRef.current);
     return () => ro.disconnect();
   }, [recomputeScale]);
+
+  // ツールバーが収まる最低幅を確保する。縦長画像で窓が狭いとアイコンが潰れるため、
+  // ツールバーの自然幅まで窓を広げる（モニター幅でクランプ）。画像が広ければ何もしない。
+  // Ensure the window is at least wide enough for the toolbar; for narrow (portrait)
+  // captures the icons would otherwise be squished. Widen to the toolbar's natural
+  // width (clamped to the monitor). No-op when the image is already wider.
+  useEffect(() => {
+    if (!imgSize) return;
+    const id = requestAnimationFrame(async () => {
+      const tb = toolbarRef.current;
+      if (!tb) return;
+      const needed = tb.scrollWidth + 2; // ツールバーの自然幅 / toolbar's natural width
+      if (needed <= window.innerWidth + 1) return; // 既に十分広い / already wide enough
+      try {
+        const win = getCurrentWebviewWindow();
+        const scale = await win.scaleFactor();
+        const outer = await win.outerSize();
+        const chromeW = outer.width / scale - window.innerWidth;
+        const maxInner = window.screen.availWidth * 0.96 - chromeW;
+        const targetInner = Math.min(needed, maxInner);
+        const outerH = outer.height / scale; // 高さは維持 / keep height
+        await win.setSize(new LogicalSize(Math.ceil(targetInner + chromeW), Math.ceil(outerH)));
+      } catch {
+        /* ウィンドウ操作不可時は無視 / Ignore when the window op is unavailable */
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [imgSize]);
 
   // 段階ズーム / Stepped zoom levels
   const stepZoom = useCallback(
@@ -738,7 +768,10 @@ function Editor() {
   return (
     <div className="flex h-screen w-screen flex-col bg-zinc-900 text-zinc-100">
       {/* ツールバー / Toolbar */}
-      <header className="flex items-center gap-1 border-b border-zinc-800 px-2 py-1.5">
+      <header
+        ref={toolbarRef}
+        className="flex items-center gap-1 overflow-x-auto border-b border-zinc-800 px-2 py-1.5 [&>*]:shrink-0"
+      >
         {TOOLS.map((t) => (
           <button
             key={t.tool}
