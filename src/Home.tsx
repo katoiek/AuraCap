@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import History from "./History";
 
 // メインウィンドウ：キャプチャボタンが主役。設定（⚙）でホットキー・コード生成を構成する
 // Main window: capture buttons are primary. The ⚙ settings view configures hotkeys & codegen.
@@ -100,7 +101,7 @@ function comboFromEvent(e: KeyboardEvent): string | null {
 
 function Home() {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [view, setView] = useState<"main" | "settings">("main");
+  const [view, setView] = useState<"main" | "settings" | "history">("main");
   const [recording, setRecording] = useState<keyof Settings | null>(null);
   const [error, setError] = useState<string | null>(null);
   // ホットキー登録の警告（他アプリ使用中のキー） / Hotkey warnings (keys held by other apps)
@@ -219,8 +220,13 @@ function Home() {
   // The settings view resizes the window to fit its content height; main returns to default
   useEffect(() => {
     const win = getCurrentWindow();
-    if (view !== "settings") {
+    if (view === "main") {
       win.setSize(new LogicalSize(480, 360)).catch(() => {});
+      return;
+    }
+    if (view === "history") {
+      // 履歴ブラウザは一覧が見やすい固定サイズ（内部スクロール）/ Fixed browser size, scrolls inside
+      win.setSize(new LogicalSize(760, 560)).catch(() => {});
       return;
     }
     const el = settingsRef.current;
@@ -252,6 +258,11 @@ function Home() {
   }, [view]);
 
   const provider = settings?.codegenProvider ?? "claude";
+
+  // ---- 履歴ブラウザ / History browser ----
+  if (view === "history") {
+    return <History onBack={() => setView("main")} />;
+  }
 
   // ---- メイン画面 / Main view ----
   if (view !== "settings") {
@@ -320,10 +331,10 @@ function Home() {
         </section>
 
         <button
-          onClick={() => invoke("open_history_dir")}
+          onClick={() => setView("history")}
           className="mt-auto rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-amber-400 hover:text-amber-300"
         >
-          履歴フォルダを開く
+          履歴を見る
         </button>
       </main>
     );

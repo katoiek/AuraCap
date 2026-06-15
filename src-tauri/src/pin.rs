@@ -18,12 +18,8 @@ pub struct PinState {
 /// Receive the edited PNG and spawn a pin window
 /// 注意: ウィンドウ生成を伴うためasync必須（同期コマンドはデッドロックする）
 /// NOTE: must be async (window creation in a sync command would deadlock)
-#[tauri::command]
-pub async fn pin_image(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
-    let png = match request.body() {
-        InvokeBody::Raw(bytes) => bytes.clone(),
-        _ => return Err("expected raw PNG bytes".into()),
-    };
+/// PNGバイト列から付箋ウィンドウを生成する共通処理 / Shared: spawn a pin window from PNG bytes
+fn spawn_pin(app: &AppHandle, png: Vec<u8>) -> Result<(), String> {
     // 表示サイズ算出のため画像サイズを取得 / Decode just for dimensions
     let (img_w, img_h) = {
         let img = xcap::image::load_from_memory(&png).map_err(|e| e.to_string())?;
@@ -46,6 +42,22 @@ pub async fn pin_image(app: AppHandle, request: tauri::ipc::Request<'_>) -> Resu
     })
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn pin_image(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let png = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        _ => return Err("expected raw PNG bytes".into()),
+    };
+    spawn_pin(&app, png)
+}
+
+/// 履歴の画像を付箋として貼る / Pin a history image
+#[tauri::command]
+pub async fn pin_history(app: AppHandle, path: String) -> Result<(), String> {
+    let png = std::fs::read(&path).map_err(|e| e.to_string())?;
+    spawn_pin(&app, png)
 }
 
 fn create_pin_window(

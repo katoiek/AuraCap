@@ -5,10 +5,57 @@ use std::fs;
 use std::path::PathBuf;
 
 use chrono::Local;
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use xcap::image::RgbaImage;
 
 type AnyError = Box<dyn std::error::Error>;
+
+/// 履歴ブラウザ用のエントリ / A history entry for the in-app browser
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub path: String,
+    pub name: String,
+}
+
+/// 履歴を新しい順に列挙する / List history entries, newest first
+#[tauri::command]
+pub fn list_history(app: AppHandle, limit: Option<usize>) -> Result<Vec<HistoryEntry>, String> {
+    let dir = history_dir(&app).map_err(|e| e.to_string())?;
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    // ファイル名がタイムスタンプなので、降順ソート＝新しい順 / Timestamp names → desc = newest first
+    paths.sort();
+    paths.reverse();
+    let limit = limit.unwrap_or(150);
+    Ok(paths
+        .into_iter()
+        .take(limit)
+        .map(|p| HistoryEntry {
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: p.to_string_lossy().into_owned(),
+        })
+        .collect())
+}
+
+/// 履歴の画像をエディタで開く / Open a history image in the editor
+#[tauri::command]
+pub async fn edit_history(app: AppHandle, path: String) -> Result<(), String> {
+    let png = fs::read(&path).map_err(|e| e.to_string())?;
+    let image = xcap::image::load_from_memory(&png)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
+    crate::editor::open_editor(&app, &image);
+    Ok(())
+}
 
 /// 履歴の上限枚数 / Maximum number of history entries
 const MAX_HISTORY: usize = 500;
