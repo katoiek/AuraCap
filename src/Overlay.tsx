@@ -378,8 +378,8 @@ function Overlay({ monitorId }: { monitorId: number }) {
           alt=""
           onLoad={() => {
             invoke("frontend_log", { message: `overlay ${monitorId}: frame loaded` });
-            // 画像が描画できる状態になってからウィンドウを表示する（白フラッシュ防止）
-            // Show the window only after the image can paint (avoids white flash)
+            // 画像が描画できる状態になったら即ウィンドウを表示する（フェードなし＝最速）
+            // Show the window immediately once the frame can paint (no fade = fastest)
             invoke("overlay_ready", { monitorId });
           }}
           onError={() =>
