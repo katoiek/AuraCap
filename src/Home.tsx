@@ -17,6 +17,9 @@ type Settings = {
   codegenProvider: string; // "claude" | "ollama"
   ollamaUrl: string;
   ollamaModel: string;
+  saveMode: string; // "ask" | "fixed" | "last"
+  saveDir: string; // 既定の保存先（空＝ピクチャ）/ Default save folder (empty = Pictures)
+  lastSaveDir: string;
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -29,6 +32,9 @@ const DEFAULT_SETTINGS: Settings = {
   codegenProvider: "claude",
   ollamaUrl: "http://127.0.0.1:11434",
   ollamaModel: "qwen2.5vl",
+  saveMode: "ask",
+  saveDir: "",
+  lastSaveDir: "",
 };
 
 const MODES = [
@@ -148,6 +154,17 @@ function Home() {
       return false;
     }
   }, []);
+
+  // 保存先フォルダをダイアログで選ぶ / Pick the default save folder via a dialog
+  const pickSaveDir = useCallback(async () => {
+    if (!settings) return;
+    try {
+      const dir = await invoke<string | null>("pick_save_dir");
+      if (dir) applySettings({ ...settings, saveDir: dir });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [settings, applySettings]);
 
   // Ollamaの /api/tags からモデル一覧を取得する / Fetch the model list from Ollama's /api/tags
   const fetchOllamaModels = useCallback(async (url: string) => {
@@ -403,6 +420,56 @@ function Home() {
         </div>
         <p className="text-xs text-zinc-500">
           オン: ✕で閉じてもトレイに常駐します。オフ: ✕でアプリを終了します。
+        </p>
+
+        {/* 保存先 / Save destination */}
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-xs text-zinc-300">保存先の動作</span>
+          <select
+            value={settings?.saveMode ?? "ask"}
+            onChange={(e) =>
+              settings && applySettings({ ...settings, saveMode: e.target.value })
+            }
+            className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-100"
+          >
+            <option value="ask">毎回確認（ダイアログ）</option>
+            <option value="fixed">指定フォルダに自動保存</option>
+            <option value="last">最後の保存先を記憶</option>
+          </select>
+        </div>
+
+        {/* "last"以外は既定/保存先フォルダを指定 / Folder applies except in "last" mode */}
+        {settings?.saveMode !== "last" && (
+          <div className="flex items-center gap-2">
+            <span
+              className="flex-1 truncate rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-400"
+              title={settings?.saveDir || "ピクチャ（既定）"}
+            >
+              {settings?.saveDir || "ピクチャ（既定）"}
+            </span>
+            <button
+              onClick={pickSaveDir}
+              className="shrink-0 rounded bg-zinc-700 px-2 py-1 text-xs hover:bg-zinc-600"
+            >
+              変更
+            </button>
+            {settings?.saveDir && (
+              <button
+                onClick={() => settings && applySettings({ ...settings, saveDir: "" })}
+                className="shrink-0 rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-700"
+                title="ピクチャに戻す"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        )}
+        <p className="text-xs text-zinc-500">
+          {settings?.saveMode === "fixed"
+            ? "保存ボタンで確認なしに上記フォルダへ保存します。"
+            : settings?.saveMode === "last"
+              ? "保存ダイアログが前回保存した場所を初期表示します。"
+              : "保存ダイアログが上記フォルダを初期表示します。"}
         </p>
       </section>
 

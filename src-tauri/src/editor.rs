@@ -174,10 +174,59 @@ pub fn export_copy(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// 編集済みPNGを名前を付けて保存。ダイアログは非ブロッキング（コールバック）方式：
-/// 同期コマンドはメインスレッドで走るため、ブロッキングダイアログはデッドロックする。
-/// Save the edited PNG via a save dialog. The dialog is callback-based (non-blocking):
-/// sync commands run on the main thread, where a blocking dialog would deadlock.
+/// 保存先フォルダを解決する。空文字や存在しないパスはピクチャにフォールバック
+/// Resolve the save folder; fall back to Pictures when empty or missing
+fn resolve_save_dir(app: &AppHandle, configured: &str) -> std::path::PathBuf {
+    if !configured.is_empty() {
+        let p = std::path::PathBuf::from(configured);
+        if p.is_dir() {
+            return p;
+        }
+    }
+    app.path()
+        .picture_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// 同名ファイルがあれば連番を付けて衝突回避 / Append a counter when the name already exists
+fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    for i in 1.. {
+        let alt = if ext.is_empty() {
+            format!("{stem}_{i}")
+        } else {
+            format!("{stem}_{i}.{ext}")
+        };
+        let p = dir.join(alt);
+        if !p.exists() {
+            return p;
+        }
+    }
+    candidate
+}
+
+/// 保存したフォルダを設定に記憶する（"last"モードと初期表示用・自動更新）
+/// Remember the folder we saved into (auto-updates "last" mode and the dialog's initial location)
+fn remember_save_dir(app: &AppHandle, dir: &std::path::Path) {
+    if let Some(state) = app.try_state::<crate::settings::SettingsState>() {
+        let snapshot = {
+            let mut s = state.0.lock().unwrap();
+            s.last_save_dir = dir.to_string_lossy().to_string();
+            s.clone()
+        };
+        let _ = crate::settings::save(app, &snapshot);
+    }
+}
+
+/// 編集済みPNGを保存。保存モードに応じて、即保存／ダイアログを切り替える。
+/// ダイアログは非ブロッキング（コールバック）方式：同期コマンドはメインスレッドで走るため、
+/// ブロッキングダイアログはデッドロックする。
+/// Save the edited PNG. Depending on save_mode it writes straight to the fixed folder or shows a
+/// dialog. The dialog is callback-based (non-blocking): a blocking dialog on the main thread would deadlock.
 #[tauri::command]
 pub fn export_save(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let png = request_png(&request)?;
@@ -185,23 +234,68 @@ pub fn export_save(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(
         "auracap_{}.png",
         chrono::Local::now().format("%Y%m%d_%H%M%S")
     );
-    let mut dialog = app.dialog().file().add_filter("PNG画像", &["png"]);
-    if let Ok(dir) = app.path().picture_dir() {
-        dialog = dialog.set_directory(dir);
+    let s = crate::settings::load(&app);
+
+    // 指定フォルダに即保存（ダイアログ無し）/ Save straight to the fixed folder, no dialog
+    if s.save_mode == "fixed" {
+        let dir = resolve_save_dir(&app, &s.save_dir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("保存先を作成できません / cannot create folder: {e}"))?;
+        let path = unique_path(&dir, &default_name);
+        std::fs::write(&path, &png).map_err(|e| e.to_string())?;
+        remember_save_dir(&app, &dir);
+        // フォルダ名をペイロードに載せて保存先を知らせる / Pass the folder so the toast can show where it went
+        let _ = app.emit_to(
+            EventTarget::labeled("editor"),
+            "export-saved",
+            dir.to_string_lossy().to_string(),
+        );
+        return Ok(());
     }
+
+    // ダイアログの初期フォルダ："last"は前回保存先、それ以外は既定 / Initial folder: last for "last" mode, else default
+    let initial = if s.save_mode == "last" && !s.last_save_dir.is_empty() {
+        resolve_save_dir(&app, &s.last_save_dir)
+    } else {
+        resolve_save_dir(&app, &s.save_dir)
+    };
     let app_for_cb = app.clone();
-    dialog.set_file_name(&default_name).save_file(move |path| {
-        let Some(path) = path else { return }; // ユーザーがキャンセル / User cancelled
-        let result = path
-            .into_path()
-            .map_err(|e| e.to_string())
-            .and_then(|p| std::fs::write(&p, &png).map_err(|e| e.to_string()));
-        match result {
-            Ok(()) => {
-                let _ = app_for_cb.emit_to(EventTarget::labeled("editor"), "export-saved", ());
+    app.dialog()
+        .file()
+        .add_filter("PNG画像", &["png"])
+        .set_directory(initial)
+        .set_file_name(&default_name)
+        .save_file(move |path| {
+            let Some(path) = path else { return }; // ユーザーがキャンセル / User cancelled
+            let pathbuf = match path.into_path() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[auracap] export save path error: {e}");
+                    return;
+                }
+            };
+            match std::fs::write(&pathbuf, &png) {
+                Ok(()) => {
+                    if let Some(parent) = pathbuf.parent() {
+                        remember_save_dir(&app_for_cb, parent);
+                    }
+                    let _ = app_for_cb.emit_to(EventTarget::labeled("editor"), "export-saved", ());
+                }
+                Err(e) => eprintln!("[auracap] export save failed: {e}"),
             }
-            Err(e) => eprintln!("[auracap] export save failed: {e}"),
-        }
-    });
+        });
     Ok(())
+}
+
+/// フォルダ選択ダイアログを開き、選ばれたパスを返す（設定画面の「保存先」変更用）。
+/// asyncコマンドはメインスレッド外で動くため、ブロッキング版を安全に使える。
+/// Open a folder picker and return the chosen path (for changing the "save folder" in settings).
+/// Async commands run off the main thread, so the blocking picker is safe here.
+#[tauri::command]
+pub async fn pick_save_dir(app: AppHandle) -> Option<String> {
+    app.dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string())
 }

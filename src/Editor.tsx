@@ -134,9 +134,12 @@ function Editor() {
       setImgSize(null);
     });
     // 保存完了はダイアログのコールバックから通知される / Save completion arrives from the dialog callback
-    const unlistenSaved = win.listen("export-saved", () => {
-      setToast("保存しました");
-      setTimeout(() => setToast(null), 1800);
+    const unlistenSaved = win.listen<string | null>("export-saved", (e) => {
+      // 自動保存時はフォルダ名をペイロードで受け取り保存先を知らせる
+      // On auto-save the folder arrives as payload so we can show where it went
+      const dir = typeof e.payload === "string" ? e.payload : "";
+      setToast(dir ? `保存しました → ${dir}` : "保存しました");
+      setTimeout(() => setToast(null), dir ? 2600 : 1800);
     });
     return () => {
       unlistenStart.then((f) => f());

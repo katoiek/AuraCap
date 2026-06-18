@@ -32,6 +32,13 @@ pub struct Settings {
     pub ollama_url: String,
     /// Ollamaのビジョン対応モデル名 / Ollama vision-capable model name
     pub ollama_model: String,
+    /// 保存先の決め方: "ask"=毎回ダイアログ / "fixed"=指定フォルダに即保存 / "last"=前回の場所を初期表示
+    /// How the save destination is chosen: "ask" = dialog every time, "fixed" = save straight to save_dir, "last" = dialog starting at the last-used folder
+    pub save_mode: String,
+    /// 既定の保存先フォルダ。空ならピクチャ / Default save folder; empty means Pictures
+    pub save_dir: String,
+    /// 最後に保存したフォルダ（"last"モードと記憶用・自動更新）/ Last folder saved into (auto-updated; used by "last" mode)
+    pub last_save_dir: String,
 }
 
 impl Default for Settings {
@@ -46,6 +53,9 @@ impl Default for Settings {
             codegen_provider: "claude".into(),
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_model: "qwen2.5vl".into(),
+            save_mode: "ask".into(),
+            save_dir: String::new(),
+            last_save_dir: String::new(),
         }
     }
 }

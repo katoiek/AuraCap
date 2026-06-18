@@ -324,6 +324,7 @@ pub fn run() {
             editor::editor_has_image,
             editor::export_copy,
             editor::export_save,
+            editor::pick_save_dir,
             redact::detect_sensitive,
             redact::extract_text,
             pin::pin_image,
