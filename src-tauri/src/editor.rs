@@ -174,6 +174,40 @@ pub fn export_copy(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// テンプレートからファイル名を生成する。{date}{time}{YYYY}{MM}{DD}{HH}{mm}{ss} を展開し、
+/// パスに使えない文字は "_" に置換、拡張子 .png を付与する。
+/// Build a file name from the template: expand date/time tokens, sanitize invalid path
+/// characters to "_", and append the .png extension.
+fn build_file_name(template: &str) -> String {
+    let now = chrono::Local::now();
+    let tmpl = template.trim();
+    let tmpl = if tmpl.is_empty() {
+        "auracap_{date}_{time}"
+    } else {
+        tmpl
+    };
+    let replaced = tmpl
+        .replace("{date}", &now.format("%Y%m%d").to_string())
+        .replace("{time}", &now.format("%H%M%S").to_string())
+        .replace("{YYYY}", &now.format("%Y").to_string())
+        .replace("{MM}", &now.format("%m").to_string())
+        .replace("{DD}", &now.format("%d").to_string())
+        .replace("{HH}", &now.format("%H").to_string())
+        .replace("{mm}", &now.format("%M").to_string())
+        .replace("{ss}", &now.format("%S").to_string());
+    // 不正文字を "_" に / Replace path-invalid characters with "_"
+    let sanitized: String = replaced
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect();
+    let base = sanitized.trim();
+    let base = if base.is_empty() { "auracap" } else { base };
+    format!("{base}.png")
+}
+
 /// 保存先フォルダを解決する。空文字や存在しないパスはピクチャにフォールバック
 /// Resolve the save folder; fall back to Pictures when empty or missing
 fn resolve_save_dir(app: &AppHandle, configured: &str) -> std::path::PathBuf {
@@ -230,11 +264,8 @@ fn remember_save_dir(app: &AppHandle, dir: &std::path::Path) {
 #[tauri::command]
 pub fn export_save(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let png = request_png(&request)?;
-    let default_name = format!(
-        "auracap_{}.png",
-        chrono::Local::now().format("%Y%m%d_%H%M%S")
-    );
     let s = crate::settings::load(&app);
+    let default_name = build_file_name(&s.file_name_template);
 
     // 指定フォルダに即保存（ダイアログ無し）/ Save straight to the fixed folder, no dialog
     if s.save_mode == "fixed" {

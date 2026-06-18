@@ -39,6 +39,9 @@ pub struct Settings {
     pub save_dir: String,
     /// 最後に保存したフォルダ（"last"モードと記憶用・自動更新）/ Last folder saved into (auto-updated; used by "last" mode)
     pub last_save_dir: String,
+    /// 手動保存時のファイル名テンプレート。{date}{time}{YYYY}{MM}{DD}{HH}{mm}{ss} を展開（拡張子は自動付与）
+    /// File-name template for manual saves; expands {date}{time}{YYYY}{MM}{DD}{HH}{mm}{ss} (extension auto-appended)
+    pub file_name_template: String,
 }
 
 impl Default for Settings {
@@ -56,6 +59,7 @@ impl Default for Settings {
             save_mode: "ask".into(),
             save_dir: String::new(),
             last_save_dir: String::new(),
+            file_name_template: "auracap_{date}_{time}".into(),
         }
     }
 }

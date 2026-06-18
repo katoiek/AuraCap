@@ -20,6 +20,7 @@ type Settings = {
   saveMode: string; // "ask" | "fixed" | "last"
   saveDir: string; // 既定の保存先（空＝ピクチャ）/ Default save folder (empty = Pictures)
   lastSaveDir: string;
+  fileNameTemplate: string;
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -35,7 +36,35 @@ const DEFAULT_SETTINGS: Settings = {
   saveMode: "ask",
   saveDir: "",
   lastSaveDir: "",
+  fileNameTemplate: "auracap_{date}_{time}",
 };
+
+// テンプレートをプレビュー文字列に展開（バックエンドの build_file_name と同じ規則）
+// Expand a template into a preview string (mirrors the backend build_file_name rules)
+function previewFileName(tmpl: string): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const YYYY = String(d.getFullYear());
+  const MM = p(d.getMonth() + 1);
+  const DD = p(d.getDate());
+  const HH = p(d.getHours());
+  const mm = p(d.getMinutes());
+  const ss = p(d.getSeconds());
+  const map: Record<string, string> = {
+    "{date}": `${YYYY}${MM}${DD}`,
+    "{time}": `${HH}${mm}${ss}`,
+    "{YYYY}": YYYY,
+    "{MM}": MM,
+    "{DD}": DD,
+    "{HH}": HH,
+    "{mm}": mm,
+    "{ss}": ss,
+  };
+  let s = tmpl.trim() || "auracap_{date}_{time}";
+  for (const [k, v] of Object.entries(map)) s = s.split(k).join(v);
+  s = s.replace(/[\\/:*?"<>|]/g, "_").trim() || "auracap";
+  return `${s}.png`;
+}
 
 const MODES = [
   {
@@ -470,6 +499,30 @@ function Home() {
             : settings?.saveMode === "last"
               ? "保存ダイアログが前回保存した場所を初期表示します。"
               : "保存ダイアログが上記フォルダを初期表示します。"}
+        </p>
+
+        {/* ファイル名テンプレート / File-name template */}
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-xs text-zinc-300">ファイル名の規則</span>
+          <span className="text-xs text-zinc-500 truncate max-w-[55%] text-right" title={previewFileName(draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? "")}>
+            例: {previewFileName(draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? "")}
+          </span>
+        </div>
+        <input
+          type="text"
+          value={draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? ""}
+          onChange={(e) => setDraft((d) => ({ ...d, fileNameTemplate: e.target.value }))}
+          onBlur={async () => {
+            if (settings && draft?.fileNameTemplate !== undefined) {
+              if (await applySettings({ ...settings, fileNameTemplate: draft.fileNameTemplate }))
+                setDraft((d) => (d ? { ...d, fileNameTemplate: undefined } : d));
+            }
+          }}
+          placeholder="auracap_{date}_{time}"
+          className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+        />
+        <p className="text-xs text-zinc-500">
+          使えるトークン: {"{date} {time} {YYYY} {MM} {DD} {HH} {mm} {ss}"}（拡張子 .png は自動付与）
         </p>
       </section>
 
