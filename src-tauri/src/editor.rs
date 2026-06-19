@@ -175,10 +175,10 @@ pub fn export_copy(request: tauri::ipc::Request<'_>) -> Result<(), String> {
 }
 
 /// テンプレートからファイル名を生成する。{date}{time}{YYYY}{MM}{DD}{HH}{mm}{ss} を展開し、
-/// パスに使えない文字は "_" に置換、拡張子 .png を付与する。
+/// パスに使えない文字は "_" に置換、指定拡張子を付与する。
 /// Build a file name from the template: expand date/time tokens, sanitize invalid path
-/// characters to "_", and append the .png extension.
-fn build_file_name(template: &str) -> String {
+/// characters to "_", and append the given extension.
+fn build_file_name(template: &str, ext: &str) -> String {
     let now = chrono::Local::now();
     let tmpl = template.trim();
     let tmpl = if tmpl.is_empty() {
@@ -205,7 +205,16 @@ fn build_file_name(template: &str) -> String {
         .collect();
     let base = sanitized.trim();
     let base = if base.is_empty() { "auracap" } else { base };
-    format!("{base}.png")
+    format!("{base}.{ext}")
+}
+
+/// 保存形式を拡張子に正規化する（フロントの toBlob と一致させる） / Normalize the save format to an extension
+fn format_ext(format: &str) -> &'static str {
+    match format.to_lowercase().as_str() {
+        "jpg" | "jpeg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
+    }
 }
 
 /// 保存先フォルダを解決する。空文字や存在しないパスはピクチャにフォールバック
@@ -265,7 +274,8 @@ fn remember_save_dir(app: &AppHandle, dir: &std::path::Path) {
 pub fn export_save(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let png = request_png(&request)?;
     let s = crate::settings::load(&app);
-    let default_name = build_file_name(&s.file_name_template);
+    let ext = format_ext(&s.save_format);
+    let default_name = build_file_name(&s.file_name_template, ext);
 
     // 指定フォルダに即保存（ダイアログ無し）/ Save straight to the fixed folder, no dialog
     if s.save_mode == "fixed" {
@@ -293,7 +303,7 @@ pub fn export_save(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<(
     let app_for_cb = app.clone();
     app.dialog()
         .file()
-        .add_filter("PNG画像", &["png"])
+        .add_filter("画像", &[ext])
         .set_directory(initial)
         .set_file_name(&default_name)
         .save_file(move |path| {

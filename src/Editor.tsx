@@ -57,6 +57,9 @@ function Editor() {
   const [selected, setSelected] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [color, setColor] = useState(COLORS[0]);
+  // 線幅の倍率（細0.6 / 中1.0 / 太1.7）。基準線幅に掛けて全体へ反映
+  // Line-width multiplier (thin/medium/thick); multiplied into the base stroke globally
+  const [strokeMul, setStrokeMul] = useState(1);
   const [fitScale, setFitScale] = useState(1);
   // 表示ズーム。nullはフィット表示（ウィンドウに合わせる） / Display zoom; null = fit to viewport
   const [zoom, setZoom] = useState<number | null>(null);
@@ -93,7 +96,8 @@ function Editor() {
   cropRef.current = crop;
 
   // アノテーションの基準サイズ（画像サイズに比例） / Annotation base sizes proportional to the image
-  const stroke = imgSize ? Math.max(3, Math.round(imgSize.w / 450)) : 3;
+  const baseStroke = imgSize ? Math.max(3, Math.round(imgSize.w / 450)) : 3;
+  const stroke = Math.max(1, Math.round(baseStroke * strokeMul));
   const fontSize = imgSize ? Math.max(18, Math.round(imgSize.w / 42)) : 18;
   const badgeR = Math.round(fontSize * 0.57);
   const blurPx = imgSize ? Math.max(10, Math.round(imgSize.w / 130)) : 10;
@@ -253,7 +257,9 @@ function Editor() {
 
   // ---- 書き出し / Export ----
 
-  const renderToPng = useCallback(async (): Promise<Uint8Array | null> => {
+  const renderToPng = useCallback(async (
+    format: "png" | "jpg" | "webp" = "png",
+  ): Promise<Uint8Array | null> => {
     const img = imgRef.current;
     if (!img || !imgSize) return null;
     const canvas = document.createElement("canvas");
@@ -322,7 +328,20 @@ function Editor() {
       out = c2;
     }
 
-    const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/png"));
+    // JPEGは透過を持てないため白背景で平坦化 / JPEG has no alpha, so flatten onto white
+    if (format === "jpg") {
+      const flat = document.createElement("canvas");
+      flat.width = out.width;
+      flat.height = out.height;
+      const fctx = flat.getContext("2d")!;
+      fctx.fillStyle = "#ffffff";
+      fctx.fillRect(0, 0, flat.width, flat.height);
+      fctx.drawImage(out, 0, 0);
+      out = flat;
+    }
+    const mime = format === "jpg" ? "image/jpeg" : format === "webp" ? "image/webp" : "image/png";
+    const quality = format === "png" ? undefined : 0.92;
+    const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, mime, quality));
     if (!blob) return null;
     return new Uint8Array(await blob.arrayBuffer());
   }, [objects, crop, imgSize, stroke, fontSize, badgeR, blurPx]);
@@ -344,10 +363,20 @@ function Editor() {
   }, [renderToPng, showToast]);
 
   const doSave = useCallback(async () => {
-    const png = await renderToPng();
-    if (!png) return;
+    // 設定の出力形式に合わせてエンコード（拡張子はバックエンドが同じ設定で付与）
+    // Encode to the configured format (the backend names the file with the same setting)
+    let format: "png" | "jpg" | "webp" = "png";
     try {
-      await invoke("export_save", png);
+      const s = await invoke<{ saveFormat?: string }>("get_settings");
+      const f = (s.saveFormat || "png").toLowerCase();
+      format = f === "jpg" || f === "jpeg" ? "jpg" : f === "webp" ? "webp" : "png";
+    } catch {
+      /* 既定のpngで続行 / fall back to png */
+    }
+    const bytes = await renderToPng(format);
+    if (!bytes) return;
+    try {
+      await invoke("export_save", bytes);
     } catch (e) {
       invoke("frontend_log", { message: `export_save failed: ${e}` });
     }
@@ -782,6 +811,39 @@ function Editor() {
   const selectedObj = objects.find((o) => o.id === selected) ?? null;
   const handleR = 6 / Math.max(scale, 0.01);
 
+  // 色を選ぶ。選択中オブジェクトがあればその色も変更する
+  // Pick a color; also recolor the selected object if any
+  const chooseColor = (c: string) => {
+    setColor(c);
+    if (selected) {
+      pushUndo();
+      setObjects((os) => os.map((o) => (o.id === selected && "color" in o ? { ...o, color: c } : o)));
+    }
+  };
+
+  // スポイト: ウィンドウ上の任意の色を吸い取る（WebView2のEyeDropper API）
+  // Eyedropper: sample any color on the window via WebView2's EyeDropper API
+  const pickWithEyeDropper = async () => {
+    const ED = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper;
+    if (!ED) {
+      setToast("スポイトはこの環境では使えません");
+      return;
+    }
+    try {
+      const res = await new ED().open();
+      if (res?.sRGBHex) chooseColor(res.sRGBHex);
+    } catch {
+      /* ユーザーがキャンセル / user canceled */
+    }
+  };
+
+  // 線幅プリセット / Line-width presets
+  const STROKE_PRESETS: { label: string; mul: number; title: string }[] = [
+    { label: "細", mul: 0.6, title: "線を細く" },
+    { label: "中", mul: 1, title: "標準の線幅" },
+    { label: "太", mul: 1.7, title: "線を太く" },
+  ];
+
   return (
     <div className="flex h-screen w-screen flex-col bg-zinc-900 text-zinc-100">
       {/* ツールバー / Toolbar */}
@@ -816,21 +878,52 @@ function Editor() {
           </button>
         )}
         <div className="mx-2 h-6 w-px bg-zinc-700" />
+        {/* 線幅プリセット / Line-width presets */}
+        {STROKE_PRESETS.map((p) => (
+          <button
+            key={p.label}
+            title={p.title}
+            onClick={() => setStrokeMul(p.mul)}
+            className={`grid h-9 w-9 place-items-center rounded-lg text-xs transition-colors ${
+              strokeMul === p.mul ? "bg-amber-400 text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+        <div className="mx-2 h-6 w-px bg-zinc-700" />
         {COLORS.map((c) => (
           <button
             key={c}
-            onClick={() => {
-              setColor(c);
-              // 選択中オブジェクトの色も変える / Recolor the selected object too
-              if (selected) {
-                pushUndo();
-                setObjects((os) => os.map((o) => (o.id === selected && "color" in o ? { ...o, color: c } : o)));
-              }
-            }}
+            onClick={() => chooseColor(c)}
             className={`h-6 w-6 rounded-full border-2 ${color === c ? "border-white" : "border-zinc-600"}`}
             style={{ backgroundColor: c }}
           />
         ))}
+        {/* 自由色（カラーピッカー） / Custom color picker */}
+        <label
+          title="自由な色を選ぶ"
+          className={`relative grid h-6 w-6 cursor-pointer place-items-center overflow-hidden rounded-full border-2 ${
+            COLORS.includes(color) ? "border-zinc-600" : "border-white"
+          }`}
+          style={{ backgroundColor: COLORS.includes(color) ? "transparent" : color }}
+        >
+          {COLORS.includes(color) && <span className="text-[11px] leading-none">🎨</span>}
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => chooseColor(e.target.value)}
+            className="absolute inset-0 cursor-pointer opacity-0"
+          />
+        </label>
+        {/* スポイト / Eyedropper */}
+        <button
+          onClick={pickWithEyeDropper}
+          title="画面から色を吸い取る（スポイト）"
+          className="grid h-9 w-9 place-items-center rounded-lg bg-zinc-800 text-base text-zinc-300 hover:bg-zinc-700"
+        >
+          🧪
+        </button>
         <div className="mx-2 h-6 w-px bg-zinc-700" />
         {/* Smart Redact（ローカルOCR） / Smart Redact (local OCR) */}
         <button

@@ -21,6 +21,7 @@ type Settings = {
   saveDir: string; // 既定の保存先（空＝ピクチャ）/ Default save folder (empty = Pictures)
   lastSaveDir: string;
   fileNameTemplate: string;
+  saveFormat: string; // "png" | "jpg" | "webp"
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -37,11 +38,17 @@ const DEFAULT_SETTINGS: Settings = {
   saveDir: "",
   lastSaveDir: "",
   fileNameTemplate: "auracap_{date}_{time}",
+  saveFormat: "png",
 };
 
 // テンプレートをプレビュー文字列に展開（バックエンドの build_file_name と同じ規則）
 // Expand a template into a preview string (mirrors the backend build_file_name rules)
-function previewFileName(tmpl: string): string {
+function formatExt(fmt: string): string {
+  const f = (fmt || "png").toLowerCase();
+  return f === "jpg" || f === "jpeg" ? "jpg" : f === "webp" ? "webp" : "png";
+}
+
+function previewFileName(tmpl: string, fmt = "png"): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   const YYYY = String(d.getFullYear());
@@ -63,7 +70,7 @@ function previewFileName(tmpl: string): string {
   let s = tmpl.trim() || "auracap_{date}_{time}";
   for (const [k, v] of Object.entries(map)) s = s.split(k).join(v);
   s = s.replace(/[\\/:*?"<>|]/g, "_").trim() || "auracap";
-  return `${s}.png`;
+  return `${s}.${formatExt(fmt)}`;
 }
 
 const MODES = [
@@ -504,8 +511,8 @@ function Home() {
         {/* ファイル名テンプレート / File-name template */}
         <div className="mt-1 flex items-center justify-between">
           <span className="text-xs text-zinc-300">ファイル名の規則</span>
-          <span className="text-xs text-zinc-500 truncate max-w-[55%] text-right" title={previewFileName(draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? "")}>
-            例: {previewFileName(draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? "")}
+          <span className="text-xs text-zinc-500 truncate max-w-[55%] text-right" title={previewFileName(draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? "", settings?.saveFormat)}>
+            例: {previewFileName(draft?.fileNameTemplate ?? settings?.fileNameTemplate ?? "", settings?.saveFormat)}
           </span>
         </div>
         <input
@@ -522,8 +529,22 @@ function Home() {
           className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
         />
         <p className="text-xs text-zinc-500">
-          使えるトークン: {"{date} {time} {YYYY} {MM} {DD} {HH} {mm} {ss}"}（拡張子 .png は自動付与）
+          使えるトークン: {"{date} {time} {YYYY} {MM} {DD} {HH} {mm} {ss}"}（拡張子は出力形式に合わせて自動付与）
         </p>
+
+        {/* 出力形式 / Output format */}
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-xs text-zinc-300">出力形式</span>
+          <select
+            value={settings?.saveFormat ?? "png"}
+            onChange={(e) => settings && applySettings({ ...settings, saveFormat: e.target.value })}
+            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+          >
+            <option value="png">PNG（可逆・透過対応）</option>
+            <option value="jpg">JPG（軽量・写真向き）</option>
+            <option value="webp">WebP（高圧縮）</option>
+          </select>
+        </div>
       </section>
 
       <div className="h-px bg-zinc-800" />

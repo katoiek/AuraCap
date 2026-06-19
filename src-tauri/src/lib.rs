@@ -74,6 +74,16 @@ fn get_settings(state: tauri::State<'_, settings::SettingsState>) -> settings::S
 /// by another app must not block saving (e.g. API key / provider changes).
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<Vec<String>, String> {
+    // last_save_dir はバックエンドが保存のたびに更新する実行時状態。
+    // 設定UIはこの値を編集しない（フロントは常に空のまま）ので、上書きで消さず既存値を引き継ぐ。
+    // last_save_dir is runtime state updated by the backend on each save. The settings UI never
+    // edits it (the frontend keeps it empty), so preserve the existing value instead of clobbering it.
+    let mut settings = settings;
+    {
+        let state = app.state::<settings::SettingsState>();
+        let current = state.0.lock().unwrap();
+        settings.last_save_dir = current.last_save_dir.clone();
+    }
     settings::save(&app, &settings)?;
     let warnings = apply_hotkeys(&app, &settings);
     *app.state::<settings::SettingsState>().0.lock().unwrap() = settings;
