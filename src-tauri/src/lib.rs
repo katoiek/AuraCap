@@ -5,6 +5,7 @@ mod capture;
 mod editor;
 mod history;
 mod pin;
+mod recorder;
 mod redact;
 mod settings;
 
@@ -204,8 +205,10 @@ pub fn run() {
         ))
         .manage(capture::SessionState::default())
         .manage(capture::UiInitiated::default())
+        .manage(capture::CaptureIntent::default())
         .manage(editor::EditorImage::default())
         .manage(pin::PinState::default())
+        .manage(recorder::RecorderState::default())
         // 凍結フレーム（無圧縮BMP）をメモリから直接WebViewへ配信する
         // Serve frozen frames (uncompressed BMP) to the webview straight from memory
         .register_uri_scheme_protocol("freeze", |ctx, request| {
@@ -328,6 +331,7 @@ pub fn run() {
             capture::finish_region_capture,
             capture::cancel_capture,
             capture::start_capture,
+            capture::start_video,
             capture::overlay_ready,
             editor::editor_ready,
             editor::close_editor,
@@ -349,6 +353,9 @@ pub fn run() {
             resume_hotkeys,
             get_autostart,
             set_autostart,
+            recorder::start_recording,
+            recorder::stop_recording,
+            recorder::is_recording,
             frontend_log
         ])
         .on_window_event(|window, event| {

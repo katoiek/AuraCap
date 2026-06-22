@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import History from "./History";
@@ -157,7 +158,62 @@ function Home() {
   const [autostart, setAutostart] = useState(false);
   // 撮影遅延（秒）。消えるUIを撮るため。セッション内の一時選択 / Capture delay (sec) for transient UI
   const [delay, setDelay] = useState(0);
+  // 画面録画（試作・全画面MP4）の状態と経過秒・保存先トースト
+  // Screen recording (prototype: fullscreen MP4): active flag, elapsed seconds, saved-path toast
+  const [recActive, setRecActive] = useState(false);
+  const [recSecs, setRecSecs] = useState(0);
+  const [recToast, setRecToast] = useState<string | null>(null);
+  // キャプチャ種別：静止画 or 動画 / Capture kind: still image or video
+  const [captureKind, setCaptureKind] = useState<"image" | "video">("image");
   const settingsRef = useRef<HTMLElement | null>(null);
+
+  // 録画状態をバックエンドのイベントに同期（ホットキー等から開始/停止された場合も反映）
+  // Sync recording state from the backend event (also reflects start/stop via hotkeys etc.)
+  useEffect(() => {
+    invoke<boolean>("is_recording").then(setRecActive).catch(() => {});
+    const un = listen<boolean>("recording-state", (e) => setRecActive(!!e.payload));
+    const unErr = listen<string>("recording-error", (e) => {
+      setRecToast(`録画エラー: ${String(e.payload).slice(0, 160)}`);
+      setTimeout(() => setRecToast(null), 5000);
+    });
+    return () => {
+      un.then((f) => f());
+      unErr.then((f) => f());
+    };
+  }, []);
+
+  // 録画中の経過秒カウンタ / Elapsed-seconds counter while recording
+  useEffect(() => {
+    if (!recActive) {
+      setRecSecs(0);
+      return;
+    }
+    const t = setInterval(() => setRecSecs((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [recActive]);
+
+  const stopRecording = useCallback(async () => {
+    try {
+      const path = await invoke<string>("stop_recording");
+      setRecToast(`保存しました → ${path}`);
+      setTimeout(() => setRecToast(null), 5000);
+    } catch (e) {
+      setRecToast(`停止エラー: ${String(e).slice(0, 160)}`);
+      setTimeout(() => setRecToast(null), 4000);
+    }
+  }, []);
+
+  // キャプチャ実行：静止画は start_capture、動画は start_video（選択後に遅延→録画）
+  // Run a capture: still → start_capture, video → start_video (delay then record after selection)
+  const runCapture = useCallback(
+    (mode: string) => {
+      const cmd = captureKind === "video" ? "start_video" : "start_capture";
+      invoke(cmd, { mode, delay }).catch((e) =>
+        invoke("frontend_log", { message: `${cmd} failed: ${e}` }),
+      );
+    },
+    [captureKind, delay],
+  );
 
   useEffect(() => {
     invoke<Settings>("get_settings")
@@ -269,14 +325,10 @@ function Home() {
     invoke("suspend_hotkeys").catch(() => {});
   };
 
-  // 設定画面はコンテンツ高に合わせてウィンドウを縦リサイズ、メイン画面は既定サイズへ戻す
-  // The settings view resizes the window to fit its content height; main returns to default
+  // メイン・設定画面はコンテンツ高に合わせてウィンドウを縦リサイズ（ボタンが見切れないように）
+  // Main & settings views resize the window to fit content height (so buttons aren't cut off)
   useEffect(() => {
     const win = getCurrentWindow();
-    if (view === "main") {
-      win.setSize(new LogicalSize(480, 360)).catch(() => {});
-      return;
-    }
     if (view === "history") {
       // 履歴ブラウザは一覧が見やすい固定サイズ（内部スクロール）/ Fixed browser size, scrolls inside
       win.setSize(new LogicalSize(760, 560)).catch(() => {});
@@ -320,7 +372,7 @@ function Home() {
   // ---- メイン画面 / Main view ----
   if (view !== "settings") {
     return (
-      <main className="flex h-screen w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
+      <main ref={settingsRef} className="flex w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
         <header className="flex items-center justify-between">
           <h1 className="text-lg font-bold tracking-wide">
             Aura<span className="text-amber-400">Cap</span>
@@ -339,7 +391,29 @@ function Home() {
           </div>
         </header>
 
-        {/* 撮影遅延セレクタ / Capture delay selector */}
+        {/* 静止画 / 動画 切替 / Still image vs. video toggle */}
+        <div className="grid grid-cols-2 gap-1 rounded-xl bg-zinc-800 p-1">
+          {([
+            { kind: "image", label: "静止画", icon: "📷" },
+            { kind: "video", label: "動画", icon: "🎬" },
+          ] as const).map((k) => (
+            <button
+              key={k.kind}
+              onClick={() => setCaptureKind(k.kind)}
+              disabled={recActive}
+              className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
+                captureKind === k.kind
+                  ? "bg-amber-400 text-zinc-900"
+                  : "text-zinc-300 hover:bg-zinc-700"
+              }`}
+            >
+              <span>{k.icon}</span>
+              {k.label}
+            </button>
+          ))}
+        </div>
+
+        {/* 遅延セレクタ（動画は選択後この秒数だけ待って録画開始）/ Delay selector (video waits this long after selection) */}
         <div className="flex items-center gap-2">
           <span className="text-xs text-zinc-400">遅延</span>
           <div className="flex gap-1">
@@ -357,24 +431,49 @@ function Home() {
               </button>
             ))}
           </div>
-          {delay > 0 && (
-            <span className="text-xs text-zinc-500">撮影まで{delay}秒待ちます</span>
-          )}
+          <span className="text-xs text-zinc-500">
+            {captureKind === "video"
+              ? delay > 0
+                ? `領域選択後 ${delay}秒で録画開始`
+                : "選択後すぐ録画開始"
+              : delay > 0
+                ? `撮影まで${delay}秒待ちます`
+                : ""}
+          </span>
         </div>
 
-        <section className="flex flex-col gap-2">
+        {/* 録画中バー / Recording-in-progress bar */}
+        {recActive && (
+          <button
+            onClick={stopRecording}
+            className="flex items-center gap-3 rounded-xl bg-red-600 px-4 py-3 text-left text-white transition-colors hover:bg-red-500"
+          >
+            <span className="text-2xl">⏹</span>
+            <span className="flex-1">
+              <span className="block text-sm font-semibold">録画を停止</span>
+              <span className="block text-xs opacity-80">
+                録画中… {Math.floor(recSecs / 60)}:{String(recSecs % 60).padStart(2, "0")}
+              </span>
+            </span>
+          </button>
+        )}
+
+        {/* キャプチャ範囲ボタン（静止画/動画で共通の選択UI）/ Capture-target buttons (shared selection UI) */}
+        <section className={`flex flex-col gap-2 ${recActive ? "pointer-events-none opacity-50" : ""}`}>
           {MODES.map((m) => (
             <button
               key={m.mode}
-              onClick={() => invoke("start_capture", { mode: m.mode, delay })}
+              onClick={() => runCapture(m.mode)}
               className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 text-left transition-colors hover:bg-zinc-700"
             >
               <span className="text-2xl text-amber-400">{m.icon}</span>
               <span className="flex-1">
                 <span className="block text-sm font-semibold">{m.label}</span>
-                <span className="block text-xs text-zinc-400">{m.description}</span>
+                <span className="block text-xs text-zinc-400">
+                  {captureKind === "video" ? `${m.description}（動画）` : m.description}
+                </span>
               </span>
-              {settings?.hotkeysEnabled && (
+              {captureKind === "image" && settings?.hotkeysEnabled && (
                 <kbd className="rounded bg-zinc-700 px-2 py-1 font-mono text-[10px] text-amber-300 group-hover:bg-zinc-600">
                   {prettyHotkey(settings[m.key])}
                 </kbd>
@@ -382,6 +481,8 @@ function Home() {
             </button>
           ))}
         </section>
+
+        {recToast && <span className="px-1 text-xs text-zinc-400 break-all">{recToast}</span>}
 
         <button
           onClick={() => setView("history")}

@@ -20,6 +20,10 @@ function App() {
   if (pinId !== null) {
     return <Pin id={Number(pinId)} />;
   }
+  // ?recframe=1 → 録画中の黄色枠バー（中身は単色、窓の背景色で表示）/ Recording frame bar (solid color)
+  if (params.get("recframe") !== null) {
+    return <div style={{ width: "100%", height: "100%", background: "#facc15" }} />;
+  }
   return <Home />;
 }
 

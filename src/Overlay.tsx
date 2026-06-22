@@ -86,6 +86,8 @@ function Overlay({ monitorId }: { monitorId: number }) {
   const loupeRef = useRef<HTMLCanvasElement | null>(null);
   const gesture = useRef<Gesture | null>(null);
   const submitting = useRef(false);
+  // ダブルクリック判定用：直近のpointerdown時刻（ms） / Last pointerdown time for double-click detection
+  const lastDownTime = useRef(0);
 
   // rAFスロットリング：mousemove毎ではなく描画フレーム毎に1回だけ反映する
   // rAF throttling: apply at most one update per animation frame, not per mousemove
@@ -225,6 +227,14 @@ function Overlay({ monitorId }: { monitorId: number }) {
       if (handle) {
         gesture.current = { kind: "resize", handle, ax: e.clientX, ay: e.clientY, start: rect };
       } else if (target.dataset.role === "selection") {
+        // 選択範囲内のダブルクリックで確定（ポインタ捕捉でdblclickが届かないため自前判定）
+        // Double-click inside the selection confirms (manual detection; pointer capture eats dblclick)
+        if (e.timeStamp - lastDownTime.current < 350) {
+          lastDownTime.current = 0;
+          confirm();
+          return;
+        }
+        lastDownTime.current = e.timeStamp;
         gesture.current = { kind: "move", ox: e.clientX - rect.left, oy: e.clientY - rect.top, start: rect };
       } else {
         return; // 選択範囲外のクリックは無視 / Ignore clicks outside the selection
@@ -307,10 +317,11 @@ function Overlay({ monitorId }: { monitorId: number }) {
         setRect(null);
         setPhase("pick");
       } else {
-        // 矩形モードはドロップで即キャプチャ。調整モードはウィンドウ選択時のみ
-        // Region mode captures immediately on drop; adjust mode is window-picking only
+        // ドロップ後は調整フェーズへ。Wクリック/✓/Enterで確定する（即キャプチャはしない）
+        // After drop, enter adjust phase; confirm via double-click / ✓ / Enter (no instant capture)
         setRect(final);
-        confirm(final);
+        setPhase("adjust");
+        setCursor(null);
       }
     } else if (g && (g.kind === "move" || g.kind === "resize")) {
       // 調整継続。ルーペは操作中のみ表示するため消す / Stay in adjust; hide the loupe (shown only mid-gesture)
@@ -391,12 +402,14 @@ function Overlay({ monitorId }: { monitorId: number }) {
       {active ? (
         <div
           data-role="selection"
-          className={`absolute border border-amber-400 ${phase === "adjust" ? "cursor-move" : ""}`}
+          className={`absolute border-[3px] border-amber-400 ${phase === "adjust" ? "cursor-move" : ""}`}
           style={{
             left: active.left,
             top: active.top,
             width: active.width,
             height: active.height,
+            // 外側を暗くする：巨大スパンのbox-shadow（再描画が軽く高速）
+            // Dim the outside via a huge-spread box-shadow (cheap to repaint, fast)
             boxShadow: "0 0 0 100000px rgba(0, 0, 0, 0.35)",
           }}
         >

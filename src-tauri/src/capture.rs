@@ -82,6 +82,22 @@ pub struct SessionState(pub Mutex<HashMap<u32, Frame>>);
 #[derive(Default)]
 pub struct UiInitiated(pub AtomicBool);
 
+/// 現在のキャプチャ意図。None=静止画 / Some(delay秒)=動画（選択確定後にdelay秒待って録画）
+/// Current capture intent. None = still image, Some(delay) = video (record after `delay`s once the region is chosen)
+#[derive(Default)]
+pub struct CaptureIntent(pub Mutex<Option<u32>>);
+
+fn set_intent(app: &AppHandle, intent: Option<u32>) {
+    if let Some(s) = app.try_state::<CaptureIntent>() {
+        *s.0.lock().unwrap() = intent;
+    }
+}
+
+fn take_intent(app: &AppHandle) -> Option<u32> {
+    app.try_state::<CaptureIntent>()
+        .and_then(|s| s.0.lock().unwrap().take())
+}
+
 fn restore_main_if_needed(app: &AppHandle) {
     if let Some(flag) = app.try_state::<UiInitiated>() {
         if flag.0.swap(false, Ordering::SeqCst) {
@@ -514,9 +530,32 @@ fn cursor_pos() -> Result<(i32, i32), AnyError> {
 /// The main window is hidden first so it does not appear in the capture.
 #[tauri::command]
 pub fn start_capture(app: AppHandle, mode: String, delay: Option<u32>) {
-    // 遅延（秒）。消えてしまうUI（メニュー・ツールチップ等）を撮るために撮影を遅らせる
-    // Delay (seconds) before the freeze, to capture transient UI (menus, tooltips, ...)
-    let delay = delay.unwrap_or(0);
+    // 静止画キャプチャ / Still-image capture
+    set_intent(&app, None);
+    trigger_capture(app, mode, delay.unwrap_or(0));
+}
+
+/// 動画キャプチャ。領域/ウィンドウは静止画と同じ選択オーバーレイを流用し、選択確定後に
+/// delay秒（カウントダウン表示なし）待って録画を開始する。全画面は選択不要で即遅延録画。
+/// Video capture. Region/window reuse the same selection overlay as still capture; after the
+/// region is chosen, recording starts after `delay`s (no countdown UI). Fullscreen records directly.
+#[tauri::command]
+pub fn start_video(app: AppHandle, mode: String, delay: Option<u32>) {
+    let delay = delay.unwrap_or(3);
+    eprintln!("[auracap] start_video mode={mode} delay={delay}");
+    set_intent(&app, Some(delay));
+    match mode.as_str() {
+        // 選択中は遅延を入れない（選んだ後にdelay秒待つ）/ No pre-delay during selection
+        "region" => trigger_capture(app, "region".into(), 0),
+        "window" => trigger_capture(app, "window".into(), 0),
+        "fullscreen" => crate::recorder::start_fullscreen_recording(&app, delay),
+        other => eprintln!("[auracap] unknown video mode: {other}"),
+    }
+}
+
+/// キャプチャ起動の共通処理：メイン窓を隠し、遅延後にモードに応じたキャプチャを行う。
+/// Shared capture trigger: hide the main window, then run the capture for the mode after a delay.
+fn trigger_capture(app: AppHandle, mode: String, delay: u32) {
     let was_visible = app
         .get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
@@ -567,6 +606,26 @@ pub async fn finish_region_capture(
     width: u32,
     height: u32,
 ) -> Result<String, String> {
+    // 動画意図なら、選択矩形をそのまま録画する（画像化はしない）。矩形はモニター基準の物理px。
+    // If the intent is video, record the selected rectangle directly (no still image). Rect is monitor-relative physical px.
+    if let Some(delay) = take_intent(&app) {
+        // 選択モニターの絶対原点を取得し、その上の点で録画対象モニターを特定する
+        // Get the selected monitor's absolute origin to resolve which monitor to record
+        let origin = {
+            let state = app.state::<SessionState>();
+            let guard = state.0.lock().unwrap();
+            guard.get(&monitor_id).map(|f| (f.info.x, f.info.y))
+        };
+        end_session(&app);
+        let (ox, oy) = origin.unwrap_or((0, 0));
+        // 矩形の絶対座標（黄色枠とモニター特定に使う）/ Rect's absolute origin (for the frame and monitor resolution)
+        let abs = (ox + x as i32, oy + y as i32);
+        eprintln!(
+            "[auracap] start region video: monitor={monitor_id} origin=({ox},{oy}) rect=({x},{y},{width},{height}) delay={delay}"
+        );
+        crate::recorder::start_region_recording(&app, abs, x, y, width, height, delay);
+        return Ok(String::new());
+    }
     let cropped = {
         let state = app.state::<SessionState>();
         let guard = state.0.lock().unwrap();
@@ -587,5 +646,7 @@ pub async fn finish_region_capture(
 
 #[tauri::command]
 pub fn cancel_capture(app: AppHandle) {
+    // 動画選択をキャンセルした場合は意図フラグも消す / Clear the video intent if the selection was canceled
+    take_intent(&app);
     end_session(&app);
 }
