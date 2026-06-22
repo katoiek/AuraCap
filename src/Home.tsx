@@ -203,12 +203,14 @@ function Home() {
     }
   }, []);
 
-  // キャプチャ実行：静止画は start_capture、動画は start_video（選択後に遅延→録画）
-  // Run a capture: still → start_capture, video → start_video (delay then record after selection)
+  // キャプチャ実行：静止画は start_capture（任意の遅延）、動画は start_video（領域選択後 必ず3秒待って録画開始）
+  // Run a capture: still → start_capture (optional delay); video → start_video (always wait 3s after selection)
   const runCapture = useCallback(
     (mode: string) => {
-      const cmd = captureKind === "video" ? "start_video" : "start_capture";
-      invoke(cmd, { mode, delay }).catch((e) =>
+      const isVideo = captureKind === "video";
+      const cmd = isVideo ? "start_video" : "start_capture";
+      const effectiveDelay = isVideo ? 3 : delay;
+      invoke(cmd, { mode, delay: effectiveDelay }).catch((e) =>
         invoke("frontend_log", { message: `${cmd} failed: ${e}` }),
       );
     },
@@ -413,34 +415,37 @@ function Home() {
           ))}
         </div>
 
-        {/* 遅延セレクタ（動画は選択後この秒数だけ待って録画開始）/ Delay selector (video waits this long after selection) */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-zinc-400">遅延</span>
-          <div className="flex gap-1">
-            {[0, 3, 5].map((d) => (
-              <button
-                key={d}
-                onClick={() => setDelay(d)}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  delay === d
-                    ? "bg-amber-400 font-semibold text-zinc-900"
-                    : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-                }`}
-              >
-                {d === 0 ? "なし" : `${d}秒`}
-              </button>
-            ))}
+        {/* 動画は遅延固定（領域選択後3秒で自動開始）。静止画のみ遅延を選べる */}
+        {/* Video has a fixed delay (auto-starts 3s after selecting the region); only stills choose a delay */}
+        {captureKind === "video" ? (
+          <div className="flex items-center gap-2 rounded-md bg-zinc-800/60 px-2.5 py-1.5">
+            <span className="text-xs text-zinc-300">
+              動画は領域選択後3秒後に自動で撮影開始になります
+            </span>
           </div>
-          <span className="text-xs text-zinc-500">
-            {captureKind === "video"
-              ? delay > 0
-                ? `領域選択後 ${delay}秒で録画開始`
-                : "選択後すぐ録画開始"
-              : delay > 0
-                ? `撮影まで${delay}秒待ちます`
-                : ""}
-          </span>
-        </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-400">遅延</span>
+            <div className="flex gap-1">
+              {[0, 3, 5].map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDelay(d)}
+                  className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+                    delay === d
+                      ? "bg-amber-400 font-semibold text-zinc-900"
+                      : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+                  }`}
+                >
+                  {d === 0 ? "なし" : `${d}秒`}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-zinc-500">
+              {delay > 0 ? `撮影まで${delay}秒待ちます` : ""}
+            </span>
+          </div>
+        )}
 
         {/* 録画中バー / Recording-in-progress bar */}
         {recActive && (

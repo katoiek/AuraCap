@@ -50,11 +50,6 @@ const HANDLE_CURSOR: Record<Handle, string> = {
 // 誤クリック扱いにする最小サイズ（物理px） / Minimum size below which a drag is ignored (physical px)
 const MIN_SELECTION_PX = 4;
 
-// ルーペ（拡大鏡）の表示サイズと倍率：1pxを8px角で表示する
-// Loupe size & zoom: each source pixel shows as an 8px cell
-const LOUPE_SIZE = 144;
-const LOUPE_ZOOM = 8;
-
 function clampRect(r: Rect, vw: number, vh: number): Rect {
   const left = Math.max(0, Math.min(r.left, vw - 1));
   const top = Math.max(0, Math.min(r.top, vh - 1));
@@ -80,10 +75,6 @@ function Overlay({ monitorId }: { monitorId: number }) {
   const [phase, setPhase] = useState<Phase>("pick");
   const [rect, setRect] = useState<Rect | null>(null);
   const [hover, setHover] = useState<{ rect: Rect; title: string } | null>(null);
-  // ルーペ用のカーソル位置（CSS px、矩形モードのみ追跡） / Cursor for the loupe (CSS px, region mode only)
-  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
-  const frameImgRef = useRef<HTMLImageElement | null>(null);
-  const loupeRef = useRef<HTMLCanvasElement | null>(null);
   const gesture = useRef<Gesture | null>(null);
   const submitting = useRef(false);
   // ダブルクリック判定用：直近のpointerdown時刻（ms） / Last pointerdown time for double-click detection
@@ -105,17 +96,29 @@ function Overlay({ monitorId }: { monitorId: number }) {
     }
   }, []);
 
-  // 凍結画像のバージョン：セッション毎に更新してimgを再取得させる（0 = 非表示）
-  // Frozen frame version: bumped per session to force an img refetch (0 = no frame shown)
-  const [imgVersion, setImgVersion] = useState(0);
-
   const resetState = useCallback(() => {
     gesture.current = null;
     submitting.current = false;
     setRect(null);
     setHover(null);
-    setCursor(null);
     setPhase("pick");
+  }, []);
+
+  // 透明窓：背景を透過させ、下の実デスクトップを見せる（SnippingやNexusと同方式・高速）
+  // Transparent window: clear backgrounds so the live desktop shows through (fast, like Snipping/Nexus)
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const root = document.getElementById("root");
+    const prev = [html.style.background, body.style.background, root?.style.background ?? ""];
+    html.style.background = "transparent";
+    body.style.background = "transparent";
+    if (root) root.style.background = "transparent";
+    return () => {
+      html.style.background = prev[0];
+      body.style.background = prev[1];
+      if (root) root.style.background = prev[2];
+    };
   }, []);
 
   // このウィンドウは常駐・使い回しのため、セッションイベントで状態を切り替える
@@ -127,28 +130,20 @@ function Overlay({ monitorId }: { monitorId: number }) {
         .then((fresh) => {
           setInfo(fresh);
           if (fresh) {
-            setImgVersion(Date.now());
-            // ずれ診断：ウィンドウ実寸（物理px換算）と凍結画像実寸の不一致を検出する
-            // Misalignment diagnostics: window size in physical px vs the frozen frame size
-            const dpr = window.devicePixelRatio;
-            invoke("frontend_log", {
-              message:
-                `overlay ${monitorId}: win ${window.innerWidth}x${window.innerHeight} @dpr=${dpr} ` +
-                `= ${Math.round(window.innerWidth * dpr)}x${Math.round(window.innerHeight * dpr)}px, ` +
-                `frame ${fresh.width}x${fresh.height}px, screen(${window.screenX},${window.screenY})`,
-            });
+            // 凍結画像を待たず、情報が揃った時点で即ウィンドウを表示する（透明窓＝最速）
+            // No frozen frame to wait for; show the window as soon as info is ready (transparent = fastest)
+            invoke("overlay_ready", { monitorId });
           }
         })
         .catch((e) => invoke("frontend_log", { message: `get_overlay_info failed: ${e}` }));
 
     const unlistenStart = win.listen("session-start", () => {
-      invoke("frontend_log", { message: `overlay ${monitorId}: session-start received` });
       resetState();
       load();
     });
     const unlistenEnd = win.listen("session-end", () => {
       resetState();
-      setImgVersion(0); // 古い凍結画像を解放 / Release the old frozen frame
+      setInfo(null);
     });
     load(); // 生成直後にセッションが既に始まっている場合に備える / In case a session is already active
 
@@ -268,16 +263,9 @@ function Overlay({ monitorId }: { monitorId: number }) {
       return;
     }
     const g = gesture.current;
-    // ルーペ用のカーソル追跡：矩形モード中、または調整モードでの枠変更・移動中
-    // Track the cursor for the loupe: region mode, or while resizing/moving in adjust mode
-    const trackCursor =
-      (info.mode === "region" && (phase === "pick" || phase === "drag")) ||
-      (phase === "adjust" && g !== null && (g.kind === "move" || g.kind === "resize"));
-    if (!g && !trackCursor) return;
+    if (!g) return;
 
     schedule(() => {
-      if (trackCursor) setCursor({ x: cx, y: cy });
-      if (!g) return;
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       if (g.kind === "draw") {
@@ -321,48 +309,13 @@ function Overlay({ monitorId }: { monitorId: number }) {
         // After drop, enter adjust phase; confirm via double-click / ✓ / Enter (no instant capture)
         setRect(final);
         setPhase("adjust");
-        setCursor(null);
       }
-    } else if (g && (g.kind === "move" || g.kind === "resize")) {
-      // 調整継続。ルーペは操作中のみ表示するため消す / Stay in adjust; hide the loupe (shown only mid-gesture)
-      setCursor(null);
     }
   };
 
-  // ルーペ描画：カーソル周辺の物理ピクセルを等倍セルで拡大表示する
-  // Draw the loupe: magnify the physical pixels around the cursor
-  useEffect(() => {
-    const canvas = loupeRef.current;
-    const img = frameImgRef.current;
-    if (!canvas || !img || !cursor) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio;
-    const src = LOUPE_SIZE / LOUPE_ZOOM; // 取り込む元領域（物理px） / Source region (physical px)
-    const px = Math.floor(cursor.x * dpr);
-    const py = Math.floor(cursor.y * dpr);
-    ctx.imageSmoothingEnabled = false;
-    ctx.fillStyle = "#18181b";
-    ctx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
-    ctx.drawImage(img, px - src / 2, py - src / 2, src, src, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
-    // 十字線はカーソルピクセルの中心を通す / Crosshair through the cursor pixel's center
-    const c = LOUPE_SIZE / 2;
-    const m = c + LOUPE_ZOOM / 2;
-    ctx.strokeStyle = "rgba(251, 191, 36, 0.55)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(m, 0);
-    ctx.lineTo(m, LOUPE_SIZE);
-    ctx.moveTo(0, m);
-    ctx.lineTo(LOUPE_SIZE, m);
-    ctx.stroke();
-    // 中心ピクセルのセルを強調 / Highlight the cursor pixel cell
-    ctx.strokeStyle = "#fbbf24";
-    ctx.strokeRect(c + 0.5, c + 0.5, LOUPE_ZOOM - 1, LOUPE_ZOOM - 1);
-  }, [cursor]);
-
   if (!info) {
-    return <div className="h-screen w-screen bg-black/40" />;
+    // 透明のまま（凍結画像を待たない）/ Stay transparent (no frozen frame to wait for)
+    return <div className="h-screen w-screen" />;
   }
 
   const dpr = window.devicePixelRatio;
@@ -379,27 +332,34 @@ function Overlay({ monitorId }: { monitorId: number }) {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
-      {/* 凍結フレーム（無圧縮BMPをメモリから直接配信） / Frozen frame (uncompressed BMP served from memory) */}
-      {imgVersion > 0 && (
-        <img
-          ref={frameImgRef}
-          src={`http://freeze.localhost/${monitorId}?v=${imgVersion}`}
-          className="absolute inset-0 h-full w-full"
-          draggable={false}
-          alt=""
-          onLoad={() => {
-            invoke("frontend_log", { message: `overlay ${monitorId}: frame loaded` });
-            // 画像が描画できる状態になったら即ウィンドウを表示する（フェードなし＝最速）
-            // Show the window immediately once the frame can paint (no fade = fastest)
-            invoke("overlay_ready", { monitorId });
-          }}
-          onError={() =>
-            invoke("frontend_log", { message: `frozen frame failed to load: monitor ${monitorId}` })
-          }
+      {/* 暗転：全面を薄暗くし、選択部だけSVGマスクでくり抜く（下の重い画像が無いので軽い）
+          Dim: darken everything and cut out the selection via an SVG mask (light; no heavy image beneath) */}
+      <svg className="pointer-events-none absolute inset-0 h-full w-full">
+        <defs>
+          <mask id="selection-mask">
+            <rect x="0" y="0" width="100%" height="100%" fill="white" />
+            {active && (
+              <rect
+                x={active.left}
+                y={active.top}
+                width={active.width}
+                height={active.height}
+                fill="black"
+              />
+            )}
+          </mask>
+        </defs>
+        <rect
+          x="0"
+          y="0"
+          width="100%"
+          height="100%"
+          fill="rgba(0, 0, 0, 0.35)"
+          mask="url(#selection-mask)"
         />
-      )}
+      </svg>
 
-      {active ? (
+      {active && (
         <div
           data-role="selection"
           className={`absolute border-[3px] border-amber-400 ${phase === "adjust" ? "cursor-move" : ""}`}
@@ -408,9 +368,6 @@ function Overlay({ monitorId }: { monitorId: number }) {
             top: active.top,
             width: active.width,
             height: active.height,
-            // 外側を暗くする：巨大スパンのbox-shadow（再描画が軽く高速）
-            // Dim the outside via a huge-spread box-shadow (cheap to repaint, fast)
-            boxShadow: "0 0 0 100000px rgba(0, 0, 0, 0.35)",
           }}
         >
           {/* サイズ表示 / Size badge */}
@@ -464,40 +421,6 @@ function Overlay({ monitorId }: { monitorId: number }) {
               </div>
             </>
           )}
-        </div>
-      ) : (
-        <div className="pointer-events-none absolute inset-0 bg-black/35" />
-      )}
-
-      {/* ルーペ：矩形モード中と、調整モードの枠変更・移動中に表示（1px単位の調整用） */}
-      {/* Loupe: shown in region mode and while adjusting the frame, for 1px-precision aiming */}
-      {cursor && imgVersion > 0 && (
-        <div
-          className="pointer-events-none absolute z-50"
-          style={{
-            // デフォルトはカーソルの左下。画面端では右・上へ回り込む
-            // Defaults to the cursor's lower-left; flips right/up near screen edges
-            left:
-              cursor.x - 24 - LOUPE_SIZE < 0
-                ? cursor.x + 24
-                : cursor.x - 24 - LOUPE_SIZE,
-            top:
-              cursor.y + 24 + LOUPE_SIZE + 28 > window.innerHeight
-                ? cursor.y - 24 - LOUPE_SIZE - 28
-                : cursor.y + 24,
-          }}
-        >
-          <canvas
-            ref={loupeRef}
-            width={LOUPE_SIZE}
-            height={LOUPE_SIZE}
-            className="block rounded-lg border-2 border-amber-400 shadow-lg"
-          />
-          <div className="mt-1 rounded bg-zinc-900/90 px-1.5 py-0.5 text-center font-mono text-xs text-amber-300">
-            {(phase === "drag" || phase === "adjust") && rect
-              ? `${Math.round(rect.width * dpr)} × ${Math.round(rect.height * dpr)}`
-              : `${Math.floor(cursor.x * dpr)}, ${Math.floor(cursor.y * dpr)}`}
-          </div>
         </div>
       )}
     </div>

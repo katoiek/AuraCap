@@ -338,8 +338,9 @@ fn create_overlay_window(
         .skip_taskbar(true)
         .always_on_top(true)
         .visible(false)
-        // 白フラッシュ防止：ページ描画前の背景を黒にする / Avoid white flash before first paint
-        .background_color(tauri::window::Color(12, 12, 14, 255))
+        // 透明窓：下の実デスクトップを透過させる（凍結画像を描画せず軽量・高速）
+        // Transparent window: let the live desktop show through (no frozen frame painted = light & fast)
+        .transparent(true)
         .build()?;
     // 位置・サイズは論理pxではなく物理pxで正確に合わせる（DPI混在対策）
     // Position/size are set in physical px, not logical (mixed-DPI safety)
