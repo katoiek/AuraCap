@@ -125,8 +125,12 @@ function Overlay({ monitorId }: { monitorId: number }) {
   // This window is resident & reused, so state transitions are driven by session events
   useEffect(() => {
     const win = getCurrentWebviewWindow();
-    const load = () =>
-      invoke<OverlayInfo | null>("get_overlay_info", { monitorId })
+    const load = () => {
+      // セッション毎に最新テーマを再適用（選択枠のアクセント色をテーマに合わせる）
+      // Re-apply the current theme each session so the selection accent matches
+      const t = localStorage.getItem("auracap_theme") || "graphite";
+      document.getElementById("root")?.setAttribute("data-theme", t);
+      return invoke<OverlayInfo | null>("get_overlay_info", { monitorId })
         .then((fresh) => {
           setInfo(fresh);
           if (fresh) {
@@ -136,6 +140,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
           }
         })
         .catch((e) => invoke("frontend_log", { message: `get_overlay_info failed: ${e}` }));
+    };
 
     const unlistenStart = win.listen("session-start", () => {
       resetState();
@@ -362,7 +367,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
       {active && (
         <div
           data-role="selection"
-          className={`absolute border-[3px] border-amber-400 ${phase === "adjust" ? "cursor-move" : ""}`}
+          className={`absolute border-[3px] border-[var(--accent)] ${phase === "adjust" ? "cursor-move" : ""}`}
           style={{
             left: active.left,
             top: active.top,
@@ -371,7 +376,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
           }}
         >
           {/* サイズ表示 / Size badge */}
-          <span className="pointer-events-none absolute -top-6 left-0 rounded bg-zinc-900/90 px-1.5 py-0.5 font-mono text-xs text-amber-300">
+          <span className="pointer-events-none absolute -top-6 left-0 rounded bg-zinc-900/90 px-1.5 py-0.5 font-mono text-xs text-[var(--accent)]">
             {Math.round(active.width * dpr)} × {Math.round(active.height * dpr)}
             {phase === "pick" && hover ? ` — ${hover.title}` : ""}
           </span>
@@ -383,7 +388,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
                 <div
                   key={h}
                   data-handle={h}
-                  className="absolute h-2.5 w-2.5 rounded-sm border border-zinc-900 bg-amber-400"
+                  className="absolute h-2.5 w-2.5 rounded-sm border border-zinc-900 bg-[var(--accent)]"
                   style={{
                     cursor: HANDLE_CURSOR[h],
                     left: h.includes("w") ? -5 : h.includes("e") ? undefined : "calc(50% - 5px)",
@@ -406,7 +411,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
               >
                 <button
                   onClick={() => confirm()}
-                  className="rounded-lg bg-amber-400 px-3 py-1.5 text-sm font-bold text-zinc-900 shadow hover:bg-amber-300"
+                  className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-bold text-zinc-900 shadow hover:bg-[var(--accent-strong)]"
                   title="キャプチャ (Enter)"
                 >
                   ✓

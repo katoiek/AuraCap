@@ -17,9 +17,11 @@ type AnyError = Box<dyn std::error::Error>;
 pub struct HistoryEntry {
     pub path: String,
     pub name: String,
+    /// "image"（PNG）または "video"（MP4）/ "image" (PNG) or "video" (MP4)
+    pub kind: String,
 }
 
-/// 履歴を新しい順に列挙する / List history entries, newest first
+/// 履歴を新しい順に列挙する（PNG静止画とMP4録画） / List history entries (PNG stills + MP4 recordings), newest first
 #[tauri::command]
 pub fn list_history(app: AppHandle, limit: Option<usize>) -> Result<Vec<HistoryEntry>, String> {
     let dir = history_dir(&app).map_err(|e| e.to_string())?;
@@ -27,7 +29,10 @@ pub fn list_history(app: AppHandle, limit: Option<usize>) -> Result<Vec<HistoryE
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|ext| ext == "png" || ext == "mp4")
+        })
         .collect();
     // ファイル名がタイムスタンプなので、降順ソート＝新しい順 / Timestamp names → desc = newest first
     paths.sort();
@@ -36,12 +41,20 @@ pub fn list_history(app: AppHandle, limit: Option<usize>) -> Result<Vec<HistoryE
     Ok(paths
         .into_iter()
         .take(limit)
-        .map(|p| HistoryEntry {
-            name: p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            path: p.to_string_lossy().into_owned(),
+        .map(|p| {
+            let kind = if p.extension().is_some_and(|e| e == "mp4") {
+                "video"
+            } else {
+                "image"
+            };
+            HistoryEntry {
+                name: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                path: p.to_string_lossy().into_owned(),
+                kind: kind.to_string(),
+            }
         })
         .collect())
 }

@@ -13,3 +13,75 @@ body,
      Keep any area outside the content dark (not white) during auto-resize */
   background: #18181b;
 }
+
+/* ===== テーマ：#root に data-theme を付けてグラデ背景＋アクセント色を切替（Nexus風） =====
+   Themes: switch gradient background and accent color via data-theme on #root (Nexus-style)
+   --accent: ベースのアクセント色（旧amber）/ base accent (was amber)
+   --accent-strong: ホバー時の明るめアクセント / brighter accent for hover */
+#root {
+  --accent: #22d3ee;
+  --accent-strong: #67e8f9;
+}
+#root[data-theme="graphite"] {
+  background-color: #18181b;
+  background-image: none;
+  --accent: #22d3ee; /* cyan */
+  --accent-strong: #67e8f9;
+}
+#root[data-theme="midnight"] {
+  background-color: #0c1024;
+  background-image:
+    radial-gradient(at 0% 100%, hsla(240, 85%, 30%, 0.85) 0, transparent 55%),
+    radial-gradient(at 50% 100%, hsla(220, 85%, 42%, 0.7) 0, transparent 60%),
+    radial-gradient(at 100% 100%, hsla(260, 85%, 32%, 0.85) 0, transparent 55%);
+  --accent: #60a5fa; /* blue */
+  --accent-strong: #93c5fd;
+}
+#root[data-theme="galaxy"] {
+  background-color: #120c20;
+  background-image:
+    radial-gradient(at 0% 100%, hsla(253, 60%, 38%, 0.85) 0, transparent 55%),
+    radial-gradient(at 50% 100%, hsla(225, 70%, 50%, 0.7) 0, transparent 60%),
+    radial-gradient(at 100% 100%, hsla(339, 70%, 50%, 0.75) 0, transparent 55%);
+  --accent: #a78bfa; /* violet */
+  --accent-strong: #c4b5fd;
+}
+#root[data-theme="emerald"] {
+  background-color: #07140f;
+  background-image:
+    radial-gradient(at 0% 100%, hsla(160, 65%, 30%, 0.85) 0, transparent 55%),
+    radial-gradient(at 50% 100%, hsla(180, 60%, 40%, 0.6) 0, transparent 60%),
+    radial-gradient(at 100% 100%, hsla(140, 60%, 38%, 0.7) 0, transparent 55%);
+  --accent: #34d399; /* emerald */
+  --accent-strong: #6ee7b7;
+}
+#root[data-theme="sky"] {
+  background-color: #08131f;
+  background-image:
+    radial-gradient(at 0% 100%, hsla(200, 75%, 35%, 0.85) 0, transparent 55%),
+    radial-gradient(at 50% 100%, hsla(210, 75%, 50%, 0.6) 0, transparent 60%),
+    radial-gradient(at 100% 100%, hsla(190, 75%, 45%, 0.7) 0, transparent 55%);
+  --accent: #38bdf8; /* sky */
+  --accent-strong: #7dd3fc;
+}
+#root[data-theme="ruby"] {
+  background-color: #1a0a10;
+  background-image:
+    radial-gradient(at 0% 100%, hsla(350, 70%, 38%, 0.85) 0, transparent 55%),
+    radial-gradient(at 50% 100%, hsla(10, 75%, 48%, 0.6) 0, transparent 60%),
+    radial-gradient(at 100% 100%, hsla(340, 70%, 45%, 0.7) 0, transparent 55%);
+  --accent: #fb7185; /* rose */
+  --accent-strong: #fda4af;
+}
+
+/* グラスパネル：グラデ背景を透かす半透明＋ぼかし / Glass panel over the gradient */
+.glass {
+  background-color: rgb(24 24 27 / 0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.glass-soft {
+  background-color: rgb(39 39 42 / 0.5);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}

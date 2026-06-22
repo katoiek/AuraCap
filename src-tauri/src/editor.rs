@@ -178,7 +178,7 @@ pub fn export_copy(request: tauri::ipc::Request<'_>) -> Result<(), String> {
 /// パスに使えない文字は "_" に置換、指定拡張子を付与する。
 /// Build a file name from the template: expand date/time tokens, sanitize invalid path
 /// characters to "_", and append the given extension.
-fn build_file_name(template: &str, ext: &str) -> String {
+pub(crate) fn build_file_name(template: &str, ext: &str) -> String {
     let now = chrono::Local::now();
     let tmpl = template.trim();
     let tmpl = if tmpl.is_empty() {
@@ -219,7 +219,7 @@ fn format_ext(format: &str) -> &'static str {
 
 /// 保存先フォルダを解決する。空文字や存在しないパスはピクチャにフォールバック
 /// Resolve the save folder; fall back to Pictures when empty or missing
-fn resolve_save_dir(app: &AppHandle, configured: &str) -> std::path::PathBuf {
+pub(crate) fn resolve_save_dir(app: &AppHandle, configured: &str) -> std::path::PathBuf {
     if !configured.is_empty() {
         let p = std::path::PathBuf::from(configured);
         if p.is_dir() {
@@ -232,7 +232,7 @@ fn resolve_save_dir(app: &AppHandle, configured: &str) -> std::path::PathBuf {
 }
 
 /// 同名ファイルがあれば連番を付けて衝突回避 / Append a counter when the name already exists
-fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+pub(crate) fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let candidate = dir.join(name);
     if !candidate.exists() {
         return candidate;
@@ -254,7 +254,7 @@ fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 
 /// 保存したフォルダを設定に記憶する（"last"モードと初期表示用・自動更新）
 /// Remember the folder we saved into (auto-updates "last" mode and the dialog's initial location)
-fn remember_save_dir(app: &AppHandle, dir: &std::path::Path) {
+pub(crate) fn remember_save_dir(app: &AppHandle, dir: &std::path::Path) {
     if let Some(state) = app.try_state::<crate::settings::SettingsState>() {
         let snapshot = {
             let mut s = state.0.lock().unwrap();

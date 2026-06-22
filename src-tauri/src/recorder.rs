@@ -9,8 +9,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, EventTarget, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
+    WebviewWindowBuilder,
 };
+use tauri_plugin_dialog::DialogExt;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -157,24 +159,19 @@ pub struct Active {
 #[derive(Default)]
 pub struct RecorderState(pub Mutex<Option<Active>>);
 
-/// 録画の保存先フォルダ。スクショ（export_save）と同じ解決規則に揃える。
-/// Recording output folder, matching the screenshot (export_save) rule.
+/// 動画エディタ窓へ渡す、プレビュー対象の録画パス（履歴の一時MP4）
+/// The recording path (temp MP4 in history) handed to the video editor window
+#[derive(Default)]
+pub struct PendingRecording(pub Mutex<Option<String>>);
+
+/// 録画の一時保存先。静止画と同じ「履歴」フォルダに保存し、プレビューから保存/破棄させる。
+/// Temp output for recordings: the same "History" folder as stills; the preview then saves/discards.
 fn recordings_dir(app: &AppHandle) -> PathBuf {
-    let s = crate::settings::load(app);
-    let configured = if s.save_mode == "last" && !s.last_save_dir.is_empty() {
-        s.last_save_dir
-    } else {
-        s.save_dir
-    };
-    if !configured.is_empty() {
-        let p = PathBuf::from(&configured);
-        if p.is_dir() {
-            return p;
-        }
-    }
-    app.path()
-        .picture_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
+    crate::history::history_dir(app).unwrap_or_else(|_| {
+        app.path()
+            .picture_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+    })
 }
 
 /// 録画対象 / What to record
@@ -186,13 +183,46 @@ pub enum RecordTarget {
     Region { abs: (i32, i32), crop: CropRect },
 }
 
-/// 黄色枠バー（4本）のウィンドウラベル / Window labels for the yellow frame bars
+/// 録画枠バー（4本）のウィンドウラベル / Window labels for the 4 frame bars
 const FRAME_LABELS: [&str; 4] = ["recframe-0", "recframe-1", "recframe-2", "recframe-3"];
+/// 枠の太さ（物理px）/ Border thickness (physical px)
+const FRAME_THICK: i32 = 3;
 
-/// 選択矩形の外側に黄色い枠バーを表示する（録画範囲には映り込まない・クリック素通し）
-/// Show yellow frame bars just outside the rect (never captured; click-through)
+/// 枠バー窓を生成（不透明・隠し）。中身はテーマ色のdiv（recframe）。
+/// Create a frame-bar window (opaque, hidden); content is a themed solid div (recframe).
+fn create_rec_frame_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, String> {
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html?recframe=1".into()))
+        .title("AuraCap")
+        .decorations(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .focused(false)
+        .shadow(false)
+        .visible(false)
+        // 描画前のちらつき防止の暗色。実際の色はdiv(var(--accent))で塗る。
+        // Dark pre-paint color; the actual color is painted by the div (var(--accent)).
+        .background_color(tauri::window::Color(24, 24, 27, 255))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// 起動時に枠バー窓4本を事前生成して常駐させる（録画毎の生成を避け高速化）
+/// Pre-create the 4 frame-bar windows at startup (avoids per-recording creation = fast)
+pub fn pre_create_rec_frame(app: &AppHandle) {
+    for label in FRAME_LABELS {
+        if app.get_webview_window(label).is_none() {
+            if let Err(e) = create_rec_frame_window(app, label) {
+                eprintln!("[auracap] failed to pre-create rec frame {label}: {e}");
+            }
+        }
+    }
+}
+
+/// 選択矩形の外側に枠（テーマ色）を表示する。常駐窓を再配置して使い回す。
+/// Show a themed frame just outside the rect by repositioning the resident bar windows.
 fn show_rec_frame(app: &AppHandle, abs_x: i32, abs_y: i32, w: u32, h: u32) {
-    let t: i32 = 3; // 枠の太さ（物理px・静止画の選択枠と統一）/ border thickness (physical px; matches the still selection)
+    let t = FRAME_THICK;
     let (w, h) = (w as i32, h as i32);
     let rects: [(i32, i32, u32, u32); 4] = [
         (abs_x - t, abs_y - t, (w + 2 * t) as u32, t as u32), // 上 / top
@@ -204,46 +234,31 @@ fn show_rec_frame(app: &AppHandle, abs_x: i32, abs_y: i32, w: u32, h: u32) {
     let _ = app.clone().run_on_main_thread(move || {
         for (i, (rx, ry, rw, rh)) in rects.iter().enumerate() {
             let label = FRAME_LABELS[i];
-            if app.get_webview_window(label).is_some() {
-                continue;
-            }
-            match WebviewWindowBuilder::new(
-                &app,
-                label,
-                WebviewUrl::App("index.html?recframe=1".into()),
-            )
-            .title("AuraCap")
-            .decorations(false)
-            .resizable(false)
-            .skip_taskbar(true)
-            .always_on_top(true)
-            .focused(false)
-            .shadow(false)
-            // 既定サイズで一瞬表示されるのを防ぐため隠して作り、位置確定後に表示する
-            // Build hidden to avoid a flash at the default size; show after positioning
-            .visible(false)
-            .background_color(tauri::window::Color(250, 204, 21, 255)) // amber-400
-            .build()
-            {
-                Ok(win) => {
-                    let _ = win.set_position(PhysicalPosition::new(*rx, *ry));
-                    let _ = win.set_size(PhysicalSize::new(*rw, *rh));
-                    let _ = win.set_ignore_cursor_events(true);
-                    let _ = win.show();
-                }
-                Err(e) => eprintln!("[auracap] rec frame {label} failed: {e}"),
-            }
+            let win = match app.get_webview_window(label) {
+                Some(w) => w,
+                None => match create_rec_frame_window(&app, label) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        eprintln!("[auracap] rec frame {label} create failed: {e}");
+                        continue;
+                    }
+                },
+            };
+            let _ = win.set_position(PhysicalPosition::new(*rx, *ry));
+            let _ = win.set_size(PhysicalSize::new(*rw, *rh));
+            let _ = win.set_ignore_cursor_events(true);
+            let _ = win.show();
         }
     });
 }
 
-/// 黄色枠バーを閉じる / Close the yellow frame bars
+/// 録画枠を隠す（窓は常駐・使い回し）/ Hide the frame bars (kept resident)
 fn hide_rec_frame(app: &AppHandle) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         for label in FRAME_LABELS {
             if let Some(w) = app.get_webview_window(label) {
-                let _ = w.close();
+                let _ = w.hide();
             }
         }
     });
@@ -305,8 +320,10 @@ fn begin_recording(app: &AppHandle, target: RecordTarget) -> Result<String, Stri
 
     let dir = recordings_dir(app);
     std::fs::create_dir_all(&dir).map_err(|e| format!("保存先を作成できません: {e}"))?;
+    // 履歴と時系列で並ぶよう静止画と同じ命名規則（auracap_<日時>）にする
+    // Same naming as stills (auracap_<timestamp>) so it sorts chronologically in history
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let path = dir.join(format!("auracap_rec_{stamp}.mp4"));
+    let path = dir.join(format!("auracap_{stamp}.mp4"));
 
     let flags = RecordFlags {
         path: path.to_string_lossy().to_string(),
@@ -418,11 +435,158 @@ pub fn stop_recording(app: AppHandle) -> Result<String, String> {
         .stop()
         .map_err(|e| format!("録画停止に失敗: {e}"))?;
     let _ = app.emit("recording-state", false);
+    // 静止画のエディタと同様、別ウィンドウのプレビューで保存/破棄させる
+    // Like the still editor, open the clip in a separate preview window to save/discard
+    open_video_editor(&app, &path);
     Ok(path)
+}
+
+/// 動画プレビュー/エディタ窓を作る（常駐・使い回し）。将来の動画エディタの土台。
+/// Create the video preview/editor window (resident & reused). Foundation for a future video editor.
+fn create_video_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    WebviewWindowBuilder::new(
+        app,
+        "video-editor",
+        WebviewUrl::App("index.html?video=1".into()),
+    )
+    .title("AuraCap — 録画")
+    .visible(false)
+    .resizable(true)
+    // 白フラッシュ防止 / Avoid white flash before first paint
+    .background_color(tauri::window::Color(24, 24, 27, 255))
+    .build()
+    .map_err(|e| e.to_string())
+}
+
+/// 起動時に動画プレビュー窓を事前生成して隠し常駐させる（初回表示の高速化）
+/// Pre-create the hidden video preview window at startup (fast first open)
+pub fn pre_create_video_editor(app: &AppHandle) {
+    if app.get_webview_window("video-editor").is_none() {
+        if let Err(e) = create_video_window(app) {
+            eprintln!("[auracap] failed to pre-create video window: {e}");
+        }
+    }
+}
+
+/// 録画（履歴の一時MP4）をプレビュー窓で開く / Open a recording in the preview window
+pub fn open_video_editor(app: &AppHandle, path: &str) {
+    if let Some(state) = app.try_state::<PendingRecording>() {
+        *state.0.lock().unwrap() = Some(path.to_string());
+    }
+    let app = app.clone();
+    let path = path.to_string();
+    let _ = app.clone().run_on_main_thread(move || {
+        let window = match app.get_webview_window("video-editor") {
+            Some(w) => w,
+            None => match create_video_window(&app) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("[auracap] failed to create video window: {e}");
+                    return;
+                }
+            },
+        };
+        // モニターの約半分のサイズに / Size to ~half the monitor
+        if let Ok(Some(m)) = window.current_monitor() {
+            let w = ((m.size().width as f64 * 0.5) as u32).max(480);
+            let h = ((m.size().height as f64 * 0.6) as u32).max(360);
+            let _ = window.set_size(PhysicalSize::new(w, h));
+            let _ = window.center();
+        }
+        // 使い回し窓へ最新パスを通知 / Tell the reused window about the latest path
+        let _ = app.emit_to(EventTarget::labeled("video-editor"), "video-open", path.clone());
+        let _ = window.show();
+        let _ = window.set_focus();
+    });
+}
+
+/// プレビュー対象の録画パスを取得（窓の初回表示用）/ Get the pending recording path (for the window's first load)
+#[tauri::command]
+pub fn get_pending_recording(app: AppHandle) -> Option<String> {
+    app.try_state::<PendingRecording>()
+        .and_then(|s| s.0.lock().unwrap().clone())
+}
+
+/// 動画プレビュー窓を閉じる（隠して使い回す）/ Close the video preview window (hide & reuse)
+#[tauri::command]
+pub fn close_video_editor(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("video-editor") {
+        let _ = w.hide();
+    }
+    if let Some(s) = app.try_state::<PendingRecording>() {
+        *s.0.lock().unwrap() = None;
+    }
 }
 
 /// 録画中かどうか / Whether a recording is in progress
 #[tauri::command]
 pub fn is_recording(app: AppHandle) -> bool {
     app.state::<RecorderState>().0.lock().unwrap().is_some()
+}
+
+/// 録画（履歴の一時MP4）を保存先へ書き出す。静止画の export_save と同じ保存規則。
+/// Export a recording (temp MP4 in history) to the save destination, mirroring still export_save.
+#[tauri::command]
+pub fn save_recording(app: AppHandle, path: String) -> Result<(), String> {
+    let src = PathBuf::from(&path);
+    if !src.is_file() {
+        return Err("録画ファイルが見つかりません / recording not found".into());
+    }
+    let s = crate::settings::load(&app);
+    let name = crate::editor::build_file_name(&s.file_name_template, "mp4");
+
+    // 指定フォルダに即コピー（ダイアログ無し）/ Copy straight to the fixed folder, no dialog
+    if s.save_mode == "fixed" {
+        let dir = crate::editor::resolve_save_dir(&app, &s.save_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("保存先を作成できません: {e}"))?;
+        let dest = crate::editor::unique_path(&dir, &name);
+        std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+        crate::editor::remember_save_dir(&app, &dir);
+        let _ = app.emit("recording-saved", dest.to_string_lossy().to_string());
+        return Ok(());
+    }
+
+    // ダイアログ（"last"は前回保存先・それ以外は既定を初期表示）/ Dialog (last folder for "last", else default)
+    let initial = if s.save_mode == "last" && !s.last_save_dir.is_empty() {
+        crate::editor::resolve_save_dir(&app, &s.last_save_dir)
+    } else {
+        crate::editor::resolve_save_dir(&app, &s.save_dir)
+    };
+    let app_cb = app.clone();
+    let src_cb = src.clone();
+    app.dialog()
+        .file()
+        .add_filter("動画", &["mp4"])
+        .set_directory(initial)
+        .set_file_name(&name)
+        .save_file(move |chosen| {
+            let Some(chosen) = chosen else { return }; // キャンセル / cancelled
+            let dest = match chosen.into_path() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[auracap] save_recording path error: {e}");
+                    return;
+                }
+            };
+            match std::fs::copy(&src_cb, &dest) {
+                Ok(_) => {
+                    if let Some(parent) = dest.parent() {
+                        crate::editor::remember_save_dir(&app_cb, parent);
+                    }
+                    let _ = app_cb.emit("recording-saved", dest.to_string_lossy().to_string());
+                }
+                Err(e) => eprintln!("[auracap] save_recording copy failed: {e}"),
+            }
+        });
+    Ok(())
+}
+
+/// 録画（履歴の一時MP4）を破棄（削除）する / Discard (delete) a recording from history
+#[tauri::command]
+pub fn discard_recording(_app: AppHandle, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if p.is_file() {
+        std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

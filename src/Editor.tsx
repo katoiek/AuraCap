@@ -860,7 +860,7 @@ function Editor() {
               setSelected(null);
             }}
             className={`grid h-9 w-9 place-items-center rounded-lg text-base transition-colors ${
-              tool === t.tool ? "bg-amber-400 text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+              tool === t.tool ? "bg-[var(--accent)] text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
             }`}
           >
             {t.icon}
@@ -885,7 +885,7 @@ function Editor() {
             title={p.title}
             onClick={() => setStrokeMul(p.mul)}
             className={`grid h-9 w-9 place-items-center rounded-lg text-xs transition-colors ${
-              strokeMul === p.mul ? "bg-amber-400 text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+              strokeMul === p.mul ? "bg-[var(--accent)] text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
             }`}
           >
             {p.label}
@@ -965,7 +965,7 @@ function Editor() {
           onClick={() => setZoom(null)}
           title="ウィンドウに合わせる (Ctrl+0)"
           className={`min-w-14 rounded-lg px-2 py-1.5 text-center font-mono text-xs hover:bg-zinc-700 ${
-            zoom === null ? "bg-zinc-800 text-zinc-400" : "bg-zinc-700 text-amber-300"
+            zoom === null ? "bg-zinc-800 text-zinc-400" : "bg-zinc-700 text-[var(--accent)]"
           }`}
         >
           {Math.round(scale * 100)}%
@@ -987,7 +987,7 @@ function Editor() {
           </button>
           <button
             onClick={doCopy}
-            className="rounded-lg bg-amber-400 px-3.5 py-1.5 text-sm font-semibold text-zinc-900 hover:bg-amber-300"
+            className="rounded-lg bg-[var(--accent)] px-3.5 py-1.5 text-sm font-semibold text-zinc-900 hover:bg-[var(--accent-strong)]"
             title="Ctrl+C"
           >
             コピー
@@ -1182,7 +1182,7 @@ function Editor() {
                   }}
                   onBlur={commitText}
                   placeholder="テキスト… (Enterで確定)"
-                  className="absolute resize-none rounded border border-amber-400 bg-zinc-900/80 px-1 py-0.5 font-bold outline-none"
+                  className="absolute resize-none rounded border border-[var(--accent)] bg-zinc-900/80 px-1 py-0.5 font-bold outline-none"
                   style={{
                     left: textEdit.x * scale - 2,
                     top: textEdit.y * scale - 2,
@@ -1201,7 +1201,7 @@ function Editor() {
 
       {/* トースト / Toast */}
       {toast && (
-        <div className="pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 rounded-lg bg-zinc-800 px-4 py-2 text-sm text-amber-300 shadow-lg">
+        <div className="pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 rounded-lg bg-zinc-800 px-4 py-2 text-sm text-[var(--accent)] shadow-lg">
           {toast}
         </div>
       )}
@@ -1223,7 +1223,7 @@ function Editor() {
                     navigator.clipboard.writeText(toCopy);
                     showToast(sel ? "選択範囲をコピーしました" : "コピーしました");
                   }}
-                  className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+                  className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-[var(--accent-strong)]"
                 >
                   コピー
                 </button>

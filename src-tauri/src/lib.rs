@@ -209,6 +209,7 @@ pub fn run() {
         .manage(editor::EditorImage::default())
         .manage(pin::PinState::default())
         .manage(recorder::RecorderState::default())
+        .manage(recorder::PendingRecording::default())
         // 凍結フレーム（無圧縮BMP）をメモリから直接WebViewへ配信する
         // Serve frozen frames (uncompressed BMP) to the webview straight from memory
         .register_uri_scheme_protocol("freeze", |ctx, request| {
@@ -321,6 +322,8 @@ pub fn run() {
             // Pre-create hidden overlays and the editor so switching is fast
             capture::pre_create_overlays(app.handle());
             editor::pre_create_editor(app.handle());
+            recorder::pre_create_video_editor(app.handle());
+            recorder::pre_create_rec_frame(app.handle());
             // ブラウザ拡張からのフルページキャプチャ受信ブリッジ
             // Local bridge that receives full-page captures from the browser extension
             bridge::start(app.handle());
@@ -356,6 +359,10 @@ pub fn run() {
             recorder::start_recording,
             recorder::stop_recording,
             recorder::is_recording,
+            recorder::save_recording,
+            recorder::discard_recording,
+            recorder::get_pending_recording,
+            recorder::close_video_editor,
             frontend_log
         ])
         .on_window_event(|window, event| {

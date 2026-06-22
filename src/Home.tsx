@@ -98,6 +98,18 @@ const MODES = [
   },
 ];
 
+// 配色テーマ（#root の data-theme で背景グラデを切替）。swatch はセレクタの色見本
+// Color themes (switch the background gradient via data-theme on #root); swatch = selector preview
+const THEMES = [
+  { id: "graphite", label: "グラファイト", swatch: "#3f3f46" },
+  { id: "midnight", label: "ミッドナイト", swatch: "#2942c4" },
+  { id: "galaxy", label: "ギャラクシー", swatch: "#7c4dff" },
+  { id: "emerald", label: "エメラルド", swatch: "#10b981" },
+  { id: "sky", label: "スカイ", swatch: "#38bdf8" },
+  { id: "ruby", label: "ルビー", swatch: "#f43f5e" },
+] as const;
+const DEFAULT_THEME = "graphite";
+
 // 保存形式（例 "Ctrl+KeyA"）→ 表示形式（"Ctrl + A"） / Stored combo → friendly display
 const ARROWS: Record<string, string> = {
   ArrowUp: "↑",
@@ -165,7 +177,16 @@ function Home() {
   const [recToast, setRecToast] = useState<string | null>(null);
   // キャプチャ種別：静止画 or 動画 / Capture kind: still image or video
   const [captureKind, setCaptureKind] = useState<"image" | "video">("image");
+  // 配色テーマ（localStorage保存・#rootのdata-themeに反映）/ Color theme (persisted; applied via data-theme)
+  const [theme, setTheme] = useState<string>(
+    () => localStorage.getItem("auracap_theme") || DEFAULT_THEME,
+  );
   const settingsRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    document.getElementById("root")?.setAttribute("data-theme", theme);
+    localStorage.setItem("auracap_theme", theme);
+  }, [theme]);
 
   // 録画状態をバックエンドのイベントに同期（ホットキー等から開始/停止された場合も反映）
   // Sync recording state from the backend event (also reflects start/stop via hotkeys etc.)
@@ -176,9 +197,16 @@ function Home() {
       setRecToast(`録画エラー: ${String(e.payload).slice(0, 160)}`);
       setTimeout(() => setRecToast(null), 5000);
     });
+    // 保存先への書き出し完了（プレビュー窓から）→ メインにもトースト
+    // Export finished (from the preview window) → also toast in the main window
+    const unSaved = listen<string>("recording-saved", (e) => {
+      setRecToast(`保存しました → ${e.payload}`);
+      setTimeout(() => setRecToast(null), 5000);
+    });
     return () => {
       un.then((f) => f());
       unErr.then((f) => f());
+      unSaved.then((f) => f());
     };
   }, []);
 
@@ -194,9 +222,9 @@ function Home() {
 
   const stopRecording = useCallback(async () => {
     try {
-      const path = await invoke<string>("stop_recording");
-      setRecToast(`保存しました → ${path}`);
-      setTimeout(() => setRecToast(null), 5000);
+      // 停止するとバックエンドが録画プレビュー窓を開く（保存/破棄はそちらで）
+      // On stop, the backend opens the recording preview window (save/discard there)
+      await invoke("stop_recording");
     } catch (e) {
       setRecToast(`停止エラー: ${String(e).slice(0, 160)}`);
       setTimeout(() => setRecToast(null), 4000);
@@ -374,10 +402,10 @@ function Home() {
   // ---- メイン画面 / Main view ----
   if (view !== "settings") {
     return (
-      <main ref={settingsRef} className="flex w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
+      <main ref={settingsRef} className="flex w-screen flex-col gap-4 p-5 text-zinc-100">
         <header className="flex items-center justify-between">
           <h1 className="text-lg font-bold tracking-wide">
-            Aura<span className="text-amber-400">Cap</span>
+            Aura<span className="text-[var(--accent)]">Cap</span>
           </h1>
           <div className="flex items-center gap-2">
             <p className="text-xs text-zinc-500">
@@ -386,7 +414,7 @@ function Home() {
             <button
               onClick={() => setView("settings")}
               title="設定"
-              className="grid h-7 w-7 place-items-center rounded-lg bg-zinc-800 text-sm text-zinc-300 hover:bg-zinc-700"
+              className="grid h-7 w-7 place-items-center rounded-lg glass-soft text-sm text-zinc-300 hover:bg-zinc-700/70"
             >
               ⚙
             </button>
@@ -394,7 +422,7 @@ function Home() {
         </header>
 
         {/* 静止画 / 動画 切替 / Still image vs. video toggle */}
-        <div className="grid grid-cols-2 gap-1 rounded-xl bg-zinc-800 p-1">
+        <div className="grid grid-cols-2 gap-1 rounded-xl glass-soft p-1">
           {([
             { kind: "image", label: "静止画", icon: "📷" },
             { kind: "video", label: "動画", icon: "🎬" },
@@ -405,7 +433,7 @@ function Home() {
               disabled={recActive}
               className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
                 captureKind === k.kind
-                  ? "bg-amber-400 text-zinc-900"
+                  ? "bg-[var(--accent)] text-zinc-900"
                   : "text-zinc-300 hover:bg-zinc-700"
               }`}
             >
@@ -433,7 +461,7 @@ function Home() {
                   onClick={() => setDelay(d)}
                   className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
                     delay === d
-                      ? "bg-amber-400 font-semibold text-zinc-900"
+                      ? "bg-[var(--accent)] font-semibold text-zinc-900"
                       : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
                   }`}
                 >
@@ -469,9 +497,9 @@ function Home() {
             <button
               key={m.mode}
               onClick={() => runCapture(m.mode)}
-              className="group flex items-center gap-3 rounded-xl bg-zinc-800 px-4 py-3 text-left transition-colors hover:bg-zinc-700"
+              className="group flex items-center gap-3 rounded-xl glass-soft px-4 py-3 text-left transition-colors hover:bg-zinc-700/70"
             >
-              <span className="text-2xl text-amber-400">{m.icon}</span>
+              <span className="text-2xl text-[var(--accent)]">{m.icon}</span>
               <span className="flex-1">
                 <span className="block text-sm font-semibold">{m.label}</span>
                 <span className="block text-xs text-zinc-400">
@@ -479,7 +507,7 @@ function Home() {
                 </span>
               </span>
               {captureKind === "image" && settings?.hotkeysEnabled && (
-                <kbd className="rounded bg-zinc-700 px-2 py-1 font-mono text-[10px] text-amber-300 group-hover:bg-zinc-600">
+                <kbd className="rounded bg-zinc-700 px-2 py-1 font-mono text-[10px] text-[var(--accent)] group-hover:bg-zinc-600">
                   {prettyHotkey(settings[m.key])}
                 </kbd>
               )}
@@ -491,7 +519,7 @@ function Home() {
 
         <button
           onClick={() => setView("history")}
-          className="mt-auto rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-amber-400 hover:text-amber-300"
+          className="mt-auto rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
         >
           履歴を見る
         </button>
@@ -503,7 +531,7 @@ function Home() {
   // h-screenにせず自然高にして、その高さへウィンドウを合わせる（上のuseEffect）
   // Natural height (no h-screen) so the window can be fit to it (see the effect above)
   return (
-    <main ref={settingsRef} className="flex w-screen flex-col gap-4 bg-zinc-900 p-5 text-zinc-100">
+    <main ref={settingsRef} className="flex w-screen flex-col gap-4 p-5 text-zinc-100">
       <header className="flex items-center gap-2">
         <button
           onClick={() => {
@@ -512,12 +540,39 @@ function Home() {
             setDraft(null);
           }}
           title="戻る"
-          className="grid h-7 w-7 place-items-center rounded-lg bg-zinc-800 text-sm text-zinc-300 hover:bg-zinc-700"
+          className="grid h-7 w-7 place-items-center rounded-lg glass-soft text-sm text-zinc-300 hover:bg-zinc-700/70"
         >
           ←
         </button>
         <h1 className="text-base font-bold tracking-wide">設定</h1>
       </header>
+
+      {/* 外観（配色テーマ）/ Appearance (color theme) */}
+      <section className="flex flex-col gap-2">
+        <span className="text-sm font-semibold">外観</span>
+        <div className="flex flex-wrap gap-2">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTheme(t.id)}
+              title={t.label}
+              className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                theme === t.id
+                  ? "border-[var(--accent)] text-[var(--accent)]"
+                  : "border-zinc-700 text-zinc-300 hover:border-zinc-500"
+              }`}
+            >
+              <span
+                className="h-4 w-4 rounded-full border border-black/30"
+                style={{ background: t.swatch }}
+              />
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <div className="h-px bg-white/10" />
 
       {/* 全般 / General */}
       <section className="flex flex-col gap-2">
@@ -530,7 +585,7 @@ function Home() {
             role="switch"
             aria-checked={autostart}
             className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-              autostart ? "bg-amber-400" : "bg-zinc-700"
+              autostart ? "bg-[var(--accent)]" : "bg-zinc-700"
             }`}
           >
             <span
@@ -550,7 +605,7 @@ function Home() {
             role="switch"
             aria-checked={settings?.closeToTray ?? true}
             className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-              settings?.closeToTray ? "bg-amber-400" : "bg-zinc-700"
+              settings?.closeToTray ? "bg-[var(--accent)]" : "bg-zinc-700"
             }`}
           >
             <span
@@ -632,7 +687,7 @@ function Home() {
             }
           }}
           placeholder="auracap_{date}_{time}"
-          className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+          className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
         />
         <p className="text-xs text-zinc-500">
           使えるトークン: {"{date} {time} {YYYY} {MM} {DD} {HH} {mm} {ss}"}（拡張子は出力形式に合わせて自動付与）
@@ -644,7 +699,7 @@ function Home() {
           <select
             value={settings?.saveFormat ?? "png"}
             onChange={(e) => settings && applySettings({ ...settings, saveFormat: e.target.value })}
-            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
           >
             <option value="png">PNG（可逆・透過対応）</option>
             <option value="jpg">JPG（軽量・写真向き）</option>
@@ -653,7 +708,7 @@ function Home() {
         </div>
       </section>
 
-      <div className="h-px bg-zinc-800" />
+      <div className="h-px bg-white/10" />
 
       {/* ホットキー設定 / Hotkey settings */}
       <section className="flex flex-col gap-2">
@@ -666,7 +721,7 @@ function Home() {
             role="switch"
             aria-checked={settings?.hotkeysEnabled ?? false}
             className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-              settings?.hotkeysEnabled ? "bg-amber-400" : "bg-zinc-700"
+              settings?.hotkeysEnabled ? "bg-[var(--accent)]" : "bg-zinc-700"
             }`}
           >
             <span
@@ -690,8 +745,8 @@ function Home() {
                   title="クリックしてショートカットを変更"
                   className={`rounded px-2 py-1 font-mono text-[10px] transition-colors ${
                     recording === m.key
-                      ? "bg-amber-400 text-zinc-900"
-                      : "bg-zinc-700 text-amber-300 hover:bg-zinc-600"
+                      ? "bg-[var(--accent)] text-zinc-900"
+                      : "bg-zinc-700 text-[var(--accent)] hover:bg-zinc-600"
                   }`}
                 >
                   {recording === m.key ? "キーを入力…" : settings ? prettyHotkey(settings[m.key]) : "…"}
@@ -704,7 +759,7 @@ function Home() {
               </p>
             )}
             {hotkeyWarnings.length > 0 && (
-              <p className="text-xs text-amber-400">
+              <p className="text-xs text-[var(--accent)]">
                 次のキーは他アプリが使用中のため無効です: {hotkeyWarnings.join("、")}
                 。別のキーに変更してください。
               </p>
@@ -713,7 +768,7 @@ function Home() {
         )}
       </section>
 
-      <div className="h-px bg-zinc-800" />
+      <div className="h-px bg-white/10" />
 
       {/* コード生成設定 / Codegen settings */}
       <section className="flex flex-col gap-2">
@@ -727,7 +782,7 @@ function Home() {
             id="codegen-provider"
             value={provider}
             onChange={(e) => settings && applySettings({ ...settings, codegenProvider: e.target.value })}
-            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
           >
             <option value="claude">Claude API</option>
             <option value="ollama">Ollama（ローカル）</option>
@@ -745,7 +800,7 @@ function Home() {
               placeholder="sk-ant-…"
               value={draft?.anthropicApiKey ?? settings?.anthropicApiKey ?? ""}
               onChange={(e) => setDraft((d) => ({ ...d, anthropicApiKey: e.target.value }))}
-              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
             />
             {draft?.anthropicApiKey !== undefined && (
               <button
@@ -754,7 +809,7 @@ function Home() {
                   if (await applySettings({ ...settings, anthropicApiKey: (draft.anthropicApiKey ?? "").trim() }))
                     setDraft(null);
                 }}
-                className="rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-amber-300"
+                className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-[var(--accent-strong)]"
               >
                 保存
               </button>
@@ -769,7 +824,7 @@ function Home() {
                 <select
                   value={settings?.ollamaModel ?? ""}
                   onChange={(e) => settings && applySettings({ ...settings, ollamaModel: e.target.value })}
-                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
                 >
                   {settings?.ollamaModel && !ollamaModels.includes(settings.ollamaModel) && (
                     <option value={settings.ollamaModel}>{settings.ollamaModel}（未インストール？）</option>
@@ -793,7 +848,7 @@ function Home() {
                         setDraft((d) => ({ ...d, ollamaModel: undefined }));
                     }
                   }}
-                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
                 />
               )}
             </div>
@@ -814,13 +869,13 @@ function Home() {
                       setDraft((d) => ({ ...d, ollamaUrl: undefined }));
                   }
                 }}
-                className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-amber-400 focus:outline-none"
+                className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
               />
               <button
                 onClick={() => fetchOllamaModels(draft?.ollamaUrl ?? settings?.ollamaUrl ?? DEFAULT_SETTINGS.ollamaUrl)}
                 disabled={loadingModels}
                 title="モデル一覧を再取得"
-                className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-amber-400 hover:text-amber-300 disabled:opacity-50"
+                className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
               >
                 {loadingModels ? "…" : "🔄"}
               </button>
