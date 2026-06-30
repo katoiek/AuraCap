@@ -195,6 +195,14 @@ pub fn run() {
         );
     }
     tauri::Builder::default()
+        // 多重起動防止は最初に登録する（公式推奨）。常駐中に2個目を起動すると
+        // そのプロセスは即終了し、ここのコールバックが既存インスタンス側で発火する。
+        // Register the single-instance guard first (recommended). A 2nd launch exits
+        // immediately and fires this callback inside the already-running instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 既存インスタンスのメインウィンドウを前面に出す / Surface the resident main window
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // ログオン時の自動起動。引数なしで通常起動（トレイ常駐）
