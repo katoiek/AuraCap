@@ -412,6 +412,37 @@ pub fn capture_fullscreen(app: &AppHandle) {
     });
 }
 
+/// ルーペ用に凍結画像の一部だけ切り出す（RGBA生バイト列）。範囲外は透明で埋める。
+/// カーソル追従で高頻度に呼ばれるため、全体を送らず小さな矩形だけ返す。
+/// Crop a small region from the frozen frame for the loupe (raw RGBA bytes); out-of-bounds
+/// pixels stay transparent. Called at high frequency while the cursor moves, so keep it tiny.
+pub fn crop_loupe_region(image: &RgbaImage, center_x: i32, center_y: i32, size: u32) -> Vec<u8> {
+    let (iw, ih) = (image.width() as i32, image.height() as i32);
+    let half = (size / 2) as i32;
+    let start_x = center_x - half;
+    let start_y = center_y - half;
+    let raw = image.as_raw();
+    let stride = iw as usize * 4;
+    let mut buf = vec![0u8; (size * size * 4) as usize];
+    for row in 0..size as i32 {
+        let sy = start_y + row;
+        if sy < 0 || sy >= ih {
+            continue;
+        }
+        let row_base = sy as usize * stride;
+        for col in 0..size as i32 {
+            let sx = start_x + col;
+            if sx < 0 || sx >= iw {
+                continue;
+            }
+            let src = row_base + sx as usize * 4;
+            let dst = (row as usize * size as usize + col as usize) * 4;
+            buf[dst..dst + 4].copy_from_slice(&raw[src..src + 4]);
+        }
+    }
+    buf
+}
+
 // ---- デスクトップウィンドウ列挙（ウィンドウピッカー用） ----
 // ---- Desktop window enumeration (for the window picker) ----
 

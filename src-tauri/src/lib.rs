@@ -245,6 +245,49 @@ pub fn run() {
                     .unwrap(),
             }
         })
+        // ルーペ用：凍結フレームからカーソル周辺の小さな矩形だけ切り出して配信する
+        // （全体のBMPは送らないため、高頻度に呼ばれても軽い）
+        // Loupe: serve a tiny crop around the cursor from the frozen frame
+        // (never the full BMP, so it stays light even at high call frequency)
+        .register_uri_scheme_protocol("loupe", |ctx, request| {
+            let app = ctx.app_handle();
+            let uri = request.uri();
+            let monitor_id: Option<u32> = uri.path().trim_start_matches('/').parse().ok();
+            let mut x: i32 = 0;
+            let mut y: i32 = 0;
+            let mut size: u32 = 18;
+            for pair in uri.query().unwrap_or("").split('&') {
+                let mut it = pair.splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("x"), Some(v)) => x = v.parse().unwrap_or(0),
+                    (Some("y"), Some(v)) => y = v.parse().unwrap_or(0),
+                    (Some("size"), Some(v)) => size = v.parse().unwrap_or(18),
+                    _ => {}
+                }
+            }
+            let body: Option<Vec<u8>> = monitor_id.and_then(|id| {
+                let state = app.state::<capture::SessionState>();
+                let guard = state.0.lock().unwrap();
+                guard
+                    .get(&id)
+                    .map(|frame| capture::crop_loupe_region(&frame.image, x, y, size))
+            });
+            match body {
+                Some(bytes) => tauri::http::Response::builder()
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Cache-Control", "no-store")
+                    // フロントはfetch()で取得するためCORSヘッダが無いとブロックされる
+                    // The frontend reads this via fetch(); without a CORS header the browser blocks it
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(bytes)
+                    .unwrap(),
+                None => tauri::http::Response::builder()
+                    .status(404)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::new())
+                    .unwrap(),
+            }
+        })
         // 編集対象画像を配信する。CORSヘッダはcanvasの汚染（taint）回避に必要
         // Serve the image being edited; CORS header keeps the canvas untainted
         .register_uri_scheme_protocol("edit", |ctx, _request| {
