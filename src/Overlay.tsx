@@ -51,10 +51,13 @@ const HANDLE_CURSOR: Record<Handle, string> = {
 const MIN_SELECTION_PX = 4;
 
 // ルーペ（拡大鏡）の表示サイズと倍率：1pxを8px角で表示する
-// Loupe size & zoom: each source pixel shows as an 8px cell
-const LOUPE_SIZE = 144;
+// ルーペのサイズと倍率：元画像1pxを8pxのセルで表示。取得ピクセル数は必ず奇数にして
+// カーソルのピクセルをルーペの中央セルにぴったり置く（十字線が中心からずれるのを防ぐ）
+// Loupe size & zoom: each source pixel shows as an 8px cell. LOUPE_SRC must be ODD so the
+// cursor pixel lands exactly in the center cell (keeps the crosshair dead-center).
 const LOUPE_ZOOM = 8;
-const LOUPE_SRC = LOUPE_SIZE / LOUPE_ZOOM;
+const LOUPE_SRC = 17;
+const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 136
 
 function clampRect(r: Rect, vw: number, vh: number): Rect {
   const left = Math.max(0, Math.min(r.left, vw - 1));
@@ -251,13 +254,14 @@ function Overlay({ monitorId }: { monitorId: number }) {
         }
         ctx.stroke();
 
-        // 十字線はカーソルピクセルの中心を通す / Crosshair through the cursor pixel's center
+        // 十字線はカーソルピクセルのセル中心を通す（backendの切り出しと同じく half=size/2）
+        // Crosshair through the center of the cursor pixel's cell (matches backend crop: half=size/2)
         const accent =
           getComputedStyle(document.getElementById("root") ?? document.documentElement)
             .getPropertyValue("--accent")
             .trim() || "#22d3ee";
-        const c = LOUPE_SIZE / 2;
-        const m = c + LOUPE_ZOOM / 2;
+        const cellStart = Math.floor(LOUPE_SRC / 2) * LOUPE_ZOOM; // カーソルピクセルのセル左上 / top-left of cursor cell
+        const m = cellStart + LOUPE_ZOOM / 2; // セル中心＝奇数SRCならルーペ中心 / cell center (= loupe center for odd SRC)
         ctx.strokeStyle = `${accent}8c`;
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -266,9 +270,9 @@ function Overlay({ monitorId }: { monitorId: number }) {
         ctx.moveTo(0, m);
         ctx.lineTo(LOUPE_SIZE, m);
         ctx.stroke();
-        // 中心ピクセルのセルを強調 / Highlight the cursor pixel cell
+        // カーソルピクセルのセルを強調 / Highlight the cursor pixel cell
         ctx.strokeStyle = accent;
-        ctx.strokeRect(c + 0.5, c + 0.5, LOUPE_ZOOM - 1, LOUPE_ZOOM - 1);
+        ctx.strokeRect(cellStart + 0.5, cellStart + 0.5, LOUPE_ZOOM - 1, LOUPE_ZOOM - 1);
       })
       .catch(() => {});
 
