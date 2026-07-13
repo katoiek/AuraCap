@@ -56,8 +56,8 @@ const MIN_SELECTION_PX = 4;
 // Loupe size & zoom: each source pixel shows as an 8px cell. LOUPE_SRC must be ODD so the
 // cursor pixel lands exactly in the center cell (keeps the crosshair dead-center).
 const LOUPE_ZOOM = 8;
-const LOUPE_SRC = 17;
-const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 136
+const LOUPE_SRC = 31;
+const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 248
 
 function clampRect(r: Rect, vw: number, vh: number): Rect {
   const left = Math.max(0, Math.min(r.left, vw - 1));
