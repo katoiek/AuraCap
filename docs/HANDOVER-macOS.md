@@ -1,6 +1,6 @@
 # macOSビルド引き継ぎ / macOS Build Handover
 
-> 対象コミット / Baseline: `main` (0.1.3)
+> 対象コミット / Baseline: `main` (0.1.5)
 > 目的 / Goal: 現在Windows専用のAuraCapを **macOSでビルド・起動できる状態**にする。
 > まずは「無料版＝静止画キャプチャ＋エディタ」だけをmacOSで動かすのが最短ルート。録画・Smart Redactは後回しでよい。
 > Start by getting the **free tier (still capture + editor)** compiling on macOS. Recording and Smart Redact can come later.
@@ -24,7 +24,10 @@
 | `recorder.rs` | `windows-capture` クレート (Windows Graphics Capture) | 画面録画（Pro機能） | **macOS非対応**。別実装が必要 |
 | `redact.rs` | WinRT `Media.Ocr` | Smart Redact（OCRで機密自動検出） | **macOS非対応**。Vision.framework等で置換が必要 |
 
-`bridge.rs` / `editor.rs` / `history.rs` / `pin.rs` / `settings.rs` / `lib.rs` は **Win32非依存**（そのまま動くはず）。
+`bridge.rs` / `codegen.rs` / `editor.rs` / `history.rs` / `pin.rs` / `settings.rs` / `lib.rs` は **Win32非依存**（そのまま動くはず）。
+
+> **コード生成（Screenshot-to-Code）はクロスプラットフォーム**。Ollama通信は `codegen.rs`（reqwest）経由に移行済みで、WebViewのCORS制約を受けない。Claude APIパスも `fetch` + `anthropic-dangerous-direct-browser-access` でOS非依存。macOSでもそのまま動く見込み。
+> Code generation (Screenshot-to-Code) is cross-platform: Ollama traffic now goes through `codegen.rs` (reqwest), free of the WebView CORS constraint; the Claude path is OS-independent too.
 
 ---
 
@@ -70,6 +73,7 @@ serde_json = "1"
 chrono = "0.4.45"
 tiny_http = "0.12"
 regex = "1"
+reqwest = { version = "0.12", features = ["json"] }  # Ollama通信（macOS対応、CORS無関係）
 xcap = "0.9.6"                       # ★静止画キャプチャのコア（macOS対応）
 arboard = "3.6.1"                    # ★クリップボード（macOS対応）
 
@@ -113,6 +117,7 @@ windows-capture = "2.0.0"           # 録画
 - [ ] エディタで 選択/矩形/矢印/テキスト/ハイライト/ぼかし/バッジ/トリミング が動く
 - [ ] `Pictures/AuraCap/History` 相当（macOSは `~/Pictures/AuraCap/History`）へ自動保存＆クリップボードコピー
 - [ ] 全画面（モニタ単位）キャプチャ
+- [ ] コード生成：設定でOllama選択→ローカルモデルがドロップダウンに出る→生成が通る（`codegen.rs`経由）
 - [ ] （後回し可）ウィンドウ単位キャプチャ
 - [ ] （Pro / 後回し）録画・Smart Redact のstubがビルドを壊さない
 - [ ] `npm run tauri build` で `.app` / `.dmg` が生成される
@@ -124,7 +129,8 @@ windows-capture = "2.0.0"           # 録画
 - **無料版 = 静止画キャプチャ＋エディタ**は `xcap` + `arboard` でmacOS移植コストが低い。まずここを完成させる。
 - **録画（recorder.rs / windows-capture）** はmacOSでは `ScreenCaptureKit`（macOS 12.3+）ベースの別実装が必要。Rustからは `scap` クレート等が候補。Pro機能なので段階的に。
 - **Smart Redact（redact.rs / WinRT OCR）** はmacOSでは `Vision.framework`（`VNRecognizeTextRequest`）で置換。これもPro寄り機能なので後回し。
+- **コード生成** は移植作業不要（`codegen.rs` / `Editor.tsx` がクロスプラットフォーム）。無料版に含めてよい。
 
 ---
 
-*最終更新 / Last updated: 2026-07-13 — 引き継ぎ作成: Claude (Opus 4.8)*
+*最終更新 / Last updated: 2026-07-14（v0.1.5対応：Ollama通信のRust化・reqwest追加を反映） — 引き継ぎ作成: Claude (Opus 4.8)*
