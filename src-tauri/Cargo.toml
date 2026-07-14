@@ -1,6 +1,6 @@
 [package]
 name = "auracap"
-version = "0.1.3"
+version = "0.1.5"
 description = "AI-ready screen capture tool for Windows"
 authors = ["katoiek"]
 edition = "2021"
@@ -54,6 +54,8 @@ windows = { version = "0.62.2", features = [
 regex = "1"
 tauri-plugin-dialog = "2"
 windows-capture = "2.0.0"
+# Ollamaとの通信をRust側で行う（WebViewのfetchはCORSで弾かれるため） / HTTP client for Ollama (WebView fetch is blocked by CORS)
+reqwest = { version = "0.12", features = ["json"] }
 
 # 画像エンコード等の依存クレートはデバッグビルドでも最適化する（キャプチャ速度に直結）
 # Optimize dependency crates even in debug builds (directly affects capture speed)

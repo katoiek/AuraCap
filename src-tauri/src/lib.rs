@@ -2,6 +2,7 @@
 
 mod bridge;
 mod capture;
+mod codegen;
 mod editor;
 mod history;
 mod pin;
@@ -414,6 +415,8 @@ pub fn run() {
             recorder::discard_recording,
             recorder::get_pending_recording,
             recorder::close_video_editor,
+            codegen::ollama_list_models,
+            codegen::ollama_generate,
             frontend_log
         ])
         .on_window_event(|window, event| {

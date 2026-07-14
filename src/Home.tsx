@@ -292,13 +292,10 @@ function Home() {
   const fetchOllamaModels = useCallback(async (url: string) => {
     setLoadingModels(true);
     try {
-      const base = url.trim().replace(/\/+$/, "") || DEFAULT_SETTINGS.ollamaUrl;
-      const res = await fetch(`${base}/api/tags`);
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      const data = await res.json();
-      const names: string[] = (data.models ?? [])
-        .map((m: { name: string }) => m.name)
-        .sort((a: string, b: string) => a.localeCompare(b));
+      // Rust経由で取得（WebViewのfetchはCORSで弾かれる） / Fetch via Rust; WebView fetch is blocked by CORS
+      const names = await invoke<string[]>("ollama_list_models", {
+        url: url.trim() || DEFAULT_SETTINGS.ollamaUrl,
+      });
       setOllamaModels(names);
     } catch {
       // 未起動・URL誤り等。手入力にフォールバックさせる / Not running / bad URL → fall back to manual entry

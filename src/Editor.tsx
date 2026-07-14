@@ -533,25 +533,14 @@ function Editor() {
 
       let code: string;
       if (provider === "ollama") {
-        // OllamaネイティブAPI。完全ローカル・無料（要: ビジョン対応モデル）
-        // Ollama's native API; fully local & free (needs a vision-capable model)
-        const url = (settings.ollamaUrl?.trim() || "http://127.0.0.1:11434").replace(/\/+$/, "");
-        const res = await fetch(`${url}/api/chat`, {
-          method: "POST",
-          signal: controller.signal,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model: ollamaModel,
-            stream: false,
-            messages: [{ role: "user", content: prompt, images: [base64] }],
-          }),
+        // OllamaネイティブAPI。Rust経由で呼ぶ（WebViewのfetchはCORSで弾かれる。完全ローカル・無料、要: ビジョン対応モデル）
+        // Ollama's native API via Rust (WebView fetch is blocked by CORS); fully local & free, needs a vision-capable model
+        code = await invoke<string>("ollama_generate", {
+          url: settings.ollamaUrl?.trim() || "http://127.0.0.1:11434",
+          model: ollamaModel,
+          prompt,
+          imageBase64: base64,
         });
-        if (!res.ok) {
-          const body = await res.text();
-          throw new Error(`Ollama ${res.status}: ${body.slice(0, 200)}`);
-        }
-        const data = await res.json();
-        code = data.message?.content ?? "";
       } else {
         const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
