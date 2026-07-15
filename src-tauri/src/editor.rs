@@ -14,20 +14,29 @@ use xcap::image::{ImageFormat, RgbaImage};
 
 type AnyError = Box<dyn std::error::Error>;
 
-/// 編集対象の画像（表示用の無圧縮BMP。edit://で配信する）
-/// The image being edited (uncompressed BMP for display, served via edit://)
+/// 編集対象の画像（edit://で配信する表示用エンコード画像）
+/// The image being edited (display-encoded image served via edit://)
 #[derive(Default)]
 pub struct EditorImage(pub Mutex<Option<Vec<u8>>>);
 
+/// 表示用エンコード形式。WindowsのWebView2(Chromium)は無圧縮BMPが高速だが、
+/// macOSのWKWebView(WebKit)は`<img>`でのBMPデコードに対応していないためPNGを使う。
+/// Display encoding format. WebView2 (Chromium) on Windows handles uncompressed BMP
+/// fast, but WKWebView (WebKit) on macOS can't decode BMP in `<img>`, so use PNG there.
+#[cfg(target_os = "macos")]
+pub(crate) const EDITOR_IMAGE_FORMAT: ImageFormat = ImageFormat::Png;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const EDITOR_IMAGE_FORMAT: ImageFormat = ImageFormat::Bmp;
+
 /// 撮影結果をエディタで開く / Open a capture result in the editor
 pub fn open_editor(app: &AppHandle, image: &RgbaImage) {
-    let mut bmp = Vec::with_capacity((image.width() * image.height() * 4 + 64) as usize);
-    if let Err(e) = image.write_to(&mut Cursor::new(&mut bmp), ImageFormat::Bmp) {
-        eprintln!("[auracap] editor bmp encode failed: {e}");
+    let mut encoded = Vec::with_capacity((image.width() * image.height() * 4 + 64) as usize);
+    if let Err(e) = image.write_to(&mut Cursor::new(&mut encoded), EDITOR_IMAGE_FORMAT) {
+        eprintln!("[auracap] editor image encode failed: {e}");
         return;
     }
     if let Some(state) = app.try_state::<EditorImage>() {
-        *state.0.lock().unwrap() = Some(bmp);
+        *state.0.lock().unwrap() = Some(encoded);
     }
 
     let (img_w, img_h) = (image.width(), image.height());

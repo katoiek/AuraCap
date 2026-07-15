@@ -255,6 +255,8 @@ version = "0.1.5"
 dependencies = [
  "arboard",
  "chrono",
+ "core-graphics",
+ "image",
  "regex",
  "reqwest 0.12.28",
  "serde",

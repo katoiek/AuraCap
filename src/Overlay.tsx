@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 // オーバーレイ表示情報（座標・サイズは物理ピクセル）
@@ -51,13 +51,13 @@ const HANDLE_CURSOR: Record<Handle, string> = {
 const MIN_SELECTION_PX = 4;
 
 // ルーペ（拡大鏡）の表示サイズと倍率：1pxを8px角で表示する
-// ルーペのサイズと倍率：元画像1pxを8pxのセルで表示。取得ピクセル数は必ず奇数にして
+// ルーペのサイズと倍率：元画像1pxを2pxのセルで表示。取得ピクセル数は必ず奇数にして
 // カーソルのピクセルをルーペの中央セルにぴったり置く（十字線が中心からずれるのを防ぐ）
-// Loupe size & zoom: each source pixel shows as an 8px cell. LOUPE_SRC must be ODD so the
+// Loupe size & zoom: each source pixel shows as a 2px cell. LOUPE_SRC must be ODD so the
 // cursor pixel lands exactly in the center cell (keeps the crosshair dead-center).
-const LOUPE_ZOOM = 8;
-const LOUPE_SRC = 31;
-const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 248
+const LOUPE_ZOOM = 2;
+const LOUPE_SRC = 75;
+const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 150
 
 function clampRect(r: Rect, vw: number, vh: number): Rect {
   const left = Math.max(0, Math.min(r.left, vw - 1));
@@ -230,7 +230,11 @@ function Overlay({ monitorId }: { monitorId: number }) {
     const px = Math.floor(cursor.x * dpr);
     const py = Math.floor(cursor.y * dpr);
 
-    fetch(`http://loupe.localhost/${monitorId}?x=${px}&y=${py}&size=${LOUPE_SRC}`)
+    // カスタムプロトコルのURL形式はOS依存（Windows/Android: http://<scheme>.localhost/、
+    // macOS/Linux: <scheme>://localhost/）なのでconvertFileSrcに切り替えを任せる
+    // The custom protocol URL shape is OS-dependent (Windows/Android: http://<scheme>.localhost/,
+    // macOS/Linux: <scheme>://localhost/), so let convertFileSrc pick the right one
+    fetch(`${convertFileSrc(String(monitorId), "loupe")}?x=${px}&y=${py}&size=${LOUPE_SRC}`)
       .then((res) => (res.ok ? res.arrayBuffer() : null))
       .then((buffer) => {
         if (cancelled || !buffer) return;

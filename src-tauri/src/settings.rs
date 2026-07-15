@@ -46,14 +46,32 @@ pub struct Settings {
     pub save_format: String,
 }
 
+/// 既定のホットキー。MacキーボードにPrintScreenは無いため、macOSはCommand系の組み合わせにする
+/// （OS標準のCmd+Shift+3/4/5と衝突しない組み合わせ）。
+/// Default hotkeys. Macs have no PrintScreen key, so macOS uses Command-based combos
+/// that don't collide with the OS-standard Cmd+Shift+3/4/5.
+#[cfg(target_os = "macos")]
+const DEFAULT_HOTKEY_REGION: &str = "Cmd+Shift+2";
+#[cfg(target_os = "macos")]
+const DEFAULT_HOTKEY_WINDOW: &str = "Cmd+Shift+1";
+#[cfg(target_os = "macos")]
+const DEFAULT_HOTKEY_FULLSCREEN: &str = "Cmd+Shift+6";
+
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_HOTKEY_REGION: &str = "PrintScreen";
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_HOTKEY_WINDOW: &str = "Ctrl+PrintScreen";
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_HOTKEY_FULLSCREEN: &str = "Shift+PrintScreen";
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             close_to_tray: true,
             hotkeys_enabled: true,
-            hotkey_region: "PrintScreen".into(),
-            hotkey_window: "Ctrl+PrintScreen".into(),
-            hotkey_fullscreen: "Shift+PrintScreen".into(),
+            hotkey_region: DEFAULT_HOTKEY_REGION.into(),
+            hotkey_window: DEFAULT_HOTKEY_WINDOW.into(),
+            hotkey_fullscreen: DEFAULT_HOTKEY_FULLSCREEN.into(),
             anthropic_api_key: String::new(),
             codegen_provider: "claude".into(),
             ollama_url: "http://127.0.0.1:11434".into(),
