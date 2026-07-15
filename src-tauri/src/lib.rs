@@ -8,13 +8,15 @@ mod history;
 mod pin;
 mod settings;
 
-// 録画（WGC）とSmart Redact（WinRT OCR）はWindows専用API依存。
-// macOSではフロント呼び出しを壊さない「未対応」スタブに差し替える。
-// Recording (WGC) and Smart Redact (WinRT OCR) depend on Windows-only APIs;
-// on macOS, swap in "unsupported" stubs so frontend calls don't break.
-#[cfg(windows)]
+// 録画（Windows: WGC / macOS: ScreenCaptureKit）は両OSでネイティブ実装。
+// Smart Redact（WinRT OCR）はWindows専用API依存のため、macOSではフロント呼び出しを
+// 壊さない「未対応」スタブに差し替える。
+// Recording (Windows: WGC / macOS: ScreenCaptureKit) has a native implementation on both OSes.
+// Smart Redact (WinRT OCR) depends on Windows-only APIs; on macOS, swap in an "unsupported"
+// stub so frontend calls don't break.
+#[cfg(any(windows, target_os = "macos"))]
 mod recorder;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 #[path = "recorder_stub.rs"]
 mod recorder;
 
