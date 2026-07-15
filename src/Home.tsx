@@ -80,23 +80,61 @@ const MODES = [
     key: "hotkeyRegion" as const,
     label: "矩形キャプチャ",
     description: "ドラッグで範囲を選択",
-    icon: "⬚",
   },
   {
     mode: "window",
     key: "hotkeyWindow" as const,
     label: "ウィンドウキャプチャ",
     description: "前面のウィンドウを撮影",
-    icon: "🗔",
   },
   {
     mode: "fullscreen",
     key: "hotkeyFullscreen" as const,
     label: "全画面キャプチャ",
     description: "カーソルのあるモニター全体",
-    icon: "🖵",
   },
-];
+] as const;
+
+// キャプチャ範囲アイコン（線画SVG）。絵文字グリフ（🗔/🖵）はmacOSのWebKitで
+// 正しくレンダリングされない（同じ代替グリフになる）ため使わない。
+// Capture-mode icons (line-art SVG). Emoji glyphs (🗔/🖵) don't render correctly in
+// WebKit on macOS (both fall back to the same placeholder glyph), so avoid them.
+function ModeIcon({ mode }: { mode: (typeof MODES)[number]["mode"] }) {
+  const p = {
+    width: 22,
+    height: 22,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (mode) {
+    case "region": // 破線の矩形 / Dashed rectangle
+      return (
+        <svg {...p}>
+          <rect x="3" y="4" width="18" height="16" rx="2" strokeDasharray="3 3" />
+        </svg>
+      );
+    case "window": // タイトルバー付きのウィンドウ / Window with a title bar
+      return (
+        <svg {...p}>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <line x1="3" y1="9" x2="21" y2="9" />
+        </svg>
+      );
+    case "fullscreen": // スタンド付きのモニター / Monitor on a stand
+      return (
+        <svg {...p}>
+          <rect x="3" y="4" width="18" height="12" rx="2" />
+          <line x1="8" y1="20" x2="16" y2="20" />
+          <line x1="12" y1="16" x2="12" y2="20" />
+        </svg>
+      );
+  }
+}
 
 // 配色テーマ（#root の data-theme で背景グラデを切替）。swatch はセレクタの色見本
 // Color themes (switch the background gradient via data-theme on #root); swatch = selector preview
@@ -496,7 +534,9 @@ function Home() {
               onClick={() => runCapture(m.mode)}
               className="group flex items-center gap-3 rounded-xl glass-soft px-4 py-3 text-left transition-colors hover:bg-zinc-700/70"
             >
-              <span className="text-2xl text-[var(--accent)]">{m.icon}</span>
+              <span className="text-[var(--accent)]">
+                <ModeIcon mode={m.mode} />
+              </span>
               <span className="flex-1">
                 <span className="block text-sm font-semibold">{m.label}</span>
                 <span className="block text-xs text-zinc-400">
