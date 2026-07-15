@@ -6,9 +6,23 @@ mod codegen;
 mod editor;
 mod history;
 mod pin;
-mod recorder;
-mod redact;
 mod settings;
+
+// 録画（WGC）とSmart Redact（WinRT OCR）はWindows専用API依存。
+// macOSではフロント呼び出しを壊さない「未対応」スタブに差し替える。
+// Recording (WGC) and Smart Redact (WinRT OCR) depend on Windows-only APIs;
+// on macOS, swap in "unsupported" stubs so frontend calls don't break.
+#[cfg(windows)]
+mod recorder;
+#[cfg(not(windows))]
+#[path = "recorder_stub.rs"]
+mod recorder;
+
+#[cfg(windows)]
+mod redact;
+#[cfg(not(windows))]
+#[path = "redact_stub.rs"]
+mod redact;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -145,9 +159,14 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
+    #[cfg(target_os = "macos")]
+    let tooltip = "AuraCap — Cmd+Shift+2で領域キャプチャ";
+    #[cfg(not(target_os = "macos"))]
+    let tooltip = "AuraCap — PrintScreenで領域キャプチャ";
+
     TrayIconBuilder::with_id("auracap-tray")
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("AuraCap — PrintScreenで領域キャプチャ")
+        .tooltip(tooltip)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -299,9 +318,15 @@ pub fn run() {
                 .lock()
                 .unwrap()
                 .clone();
+            // editor::EDITOR_IMAGE_FORMATに合わせたMIMEタイプ（macOS=PNG / Windows=BMP）
+            // MIME type matching editor::EDITOR_IMAGE_FORMAT (macOS = PNG / Windows = BMP)
+            #[cfg(target_os = "macos")]
+            let content_type = "image/png";
+            #[cfg(not(target_os = "macos"))]
+            let content_type = "image/bmp";
             match body {
                 Some(bytes) => tauri::http::Response::builder()
-                    .header("Content-Type", "image/bmp")
+                    .header("Content-Type", content_type)
                     .header("Cache-Control", "no-store")
                     .header("Access-Control-Allow-Origin", "*")
                     .body(bytes)

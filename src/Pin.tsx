@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
 
@@ -56,7 +56,7 @@ function Pin({ id }: { id: number }) {
         onDoubleClick={resizeToNative}
       >
         <img
-          src={`http://pin.localhost/${id}`}
+          src={convertFileSrc(String(id), "pin")}
           className="pointer-events-none h-full w-full object-contain"
           draggable={false}
           alt=""

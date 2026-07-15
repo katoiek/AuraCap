@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 
@@ -1066,7 +1066,7 @@ function Editor() {
         >
           <img
             ref={imgRef}
-            src={`http://edit.localhost/current?v=${version}`}
+            src={`${convertFileSrc("current", "edit")}?v=${version}`}
             crossOrigin="anonymous"
             className="absolute inset-0 h-full w-full"
             draggable={false}

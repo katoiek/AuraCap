@@ -169,14 +169,13 @@ fn begin_session(app: &AppHandle, mode: CaptureMode) -> Result<(), AnyError> {
                             "[auracap] monitor {id}: capture {capture_ms}ms, bmp encode {}ms",
                             t.elapsed().as_millis()
                         );
-                        Ok((
-                            id,
+                        let scale = monitor.scale_factor().map_err(|e| e.to_string())?;
+                        let (mon_x, mon_y) = to_physical_origin(
                             monitor.x().map_err(|e| e.to_string())?,
                             monitor.y().map_err(|e| e.to_string())?,
-                            monitor.scale_factor().map_err(|e| e.to_string())?,
-                            image,
-                            bmp,
-                        ))
+                            scale,
+                        );
+                        Ok((id, mon_x, mon_y, scale, image, bmp))
                     })
                 })
                 .collect();
@@ -454,8 +453,76 @@ struct DesktopWindow {
     height: u32,
 }
 
+/// モニター原点を物理pxへ変換する。macOSのMonitor::x()/y()はポイント単位（DIP）で返るため
+/// スケールを掛けて揃える。Windowsは元々物理pxなのでそのまま。
+/// Convert a monitor's origin to physical px. macOS's Monitor::x()/y() are in points (DIPs),
+/// so scale them; Windows already reports physical px, so pass through unchanged.
+#[cfg(target_os = "macos")]
+fn to_physical_origin(x: i32, y: i32, scale: f32) -> (i32, i32) {
+    ((x as f32 * scale).round() as i32, (y as f32 * scale).round() as i32)
+}
+#[cfg(not(target_os = "macos"))]
+fn to_physical_origin(x: i32, y: i32, _scale: f32) -> (i32, i32) {
+    (x, y)
+}
+
+/// 実際のアプリウィンドウではなく、システムChrome（メニューバー・Dockの全画面ヒット領域等）
+/// を保持しているオーナー名。ウィンドウピッカーの候補から除外する。
+/// Owners that hold system chrome (menu bar, Dock's screen-spanning hit area, ...) rather
+/// than real app windows. Excluded from the window-picker candidates.
+#[cfg(not(windows))]
+const SYSTEM_WINDOW_OWNERS: &[&str] = &["Window Server", "Dock"];
+
 /// 可視トップレベルウィンドウをZ順（最前面が先頭）で列挙する
 /// List visible top-level windows in z-order (topmost first)
+#[cfg(not(windows))]
+fn list_desktop_windows() -> Vec<DesktopWindow> {
+    // xcapのWindow::allはクロスプラットフォーム（Z順ソート済み）。自プロセスのウィンドウ、
+    // システムChrome、最小化・極小サイズのウィンドウは除外する。タイトルが空でも
+    // アプリ名があれば候補に残す（表示名はアプリ名にフォールバック）。
+    // xcap's Window::all is cross-platform (already z-sorted). Skip our own process's
+    // windows, system chrome, minimized windows, and tiny windows. Windows with an empty
+    // title still count as candidates (the label falls back to the app name).
+    let own_pid = std::process::id();
+    xcap::Window::all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| {
+            w.pid().map(|pid| pid != own_pid).unwrap_or(false)
+                && !w.is_minimized().unwrap_or(true)
+                && w.app_name()
+                    .map(|a| !SYSTEM_WINDOW_OWNERS.contains(&a.as_str()))
+                    .unwrap_or(false)
+        })
+        .filter_map(|w| {
+            let (width, height) = (w.width().ok()?, w.height().ok()?);
+            if width < 8 || height < 8 {
+                return None;
+            }
+            let title = w.title().unwrap_or_default();
+            let title = if title.is_empty() { w.app_name().ok()? } else { title };
+            // xcapはmacOSでウィンドウ座標をポイント単位（DIP）で返す。物理pxのモニター画像・
+            // カーソル座標と揃うよう、所属モニターのスケールを掛けて物理pxへ変換する。
+            // xcap reports window coordinates in points (DIPs) on macOS. Scale by the owning
+            // monitor's factor to match the physical-px monitor image and cursor coordinates.
+            let scale = w
+                .current_monitor()
+                .and_then(|m| m.scale_factor())
+                .unwrap_or(1.0);
+            Some(DesktopWindow {
+                title,
+                x: (w.x().ok()? as f32 * scale).round() as i32,
+                y: (w.y().ok()? as f32 * scale).round() as i32,
+                width: (width as f32 * scale).round() as u32,
+                height: (height as f32 * scale).round() as u32,
+            })
+        })
+        .collect()
+}
+
+/// 可視トップレベルウィンドウをZ順（最前面が先頭）で列挙する
+/// List visible top-level windows in z-order (topmost first)
+#[cfg(windows)]
 fn list_desktop_windows() -> Vec<DesktopWindow> {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
@@ -546,12 +613,25 @@ fn list_desktop_windows() -> Vec<DesktopWindow> {
     result
 }
 
+#[cfg(windows)]
 fn cursor_pos() -> Result<(i32, i32), AnyError> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut point = POINT::default();
     unsafe { GetCursorPos(&mut point)? };
     Ok((point.x, point.y))
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_pos() -> Result<(i32, i32), AnyError> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "CGEventSourceの初期化に失敗 / failed to init CGEventSource")?;
+    let event =
+        CGEvent::new(source).map_err(|_| "CGEventの取得に失敗 / failed to create CGEvent")?;
+    let point = event.location();
+    Ok((point.x as i32, point.y as i32))
 }
 
 // ---- Tauri commands (フロントエンドから呼ばれる / invoked from the frontend) ----
