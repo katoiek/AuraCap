@@ -63,9 +63,12 @@ windows = { version = "0.62.2", features = [
 ] }
 windows-capture = "2.0.0"
 
-# macOS専用（全画面キャプチャ対象モニター特定用のカーソル位置取得） / macOS-only (cursor position for fullscreen-capture monitor resolution)
+# macOS専用（カーソル位置取得・録画） / macOS-only (cursor position, recording)
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25.0"
+# 録画：ScreenCaptureKitのSCRecordingOutputでMP4へ直接ハードウェアエンコードする（macOS 15+）
+# Recording: hardware-encodes straight to MP4 via ScreenCaptureKit's SCRecordingOutput (macOS 15+)
+screencapturekit = { version = "8.0.0", features = ["macos_15_0"] }
 
 # 画像エンコード等の依存クレートはデバッグビルドでも最適化する（キャプチャ速度に直結）
 # Optimize dependency crates even in debug builds (directly affects capture speed)

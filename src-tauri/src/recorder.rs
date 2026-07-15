@@ -1,32 +1,56 @@
-// 画面録画：Windows Graphics Capture (WGC) でモニターを取得し H.264/MP4 にエンコードする。
-// 全画面はフレームをそのまま、領域録画はモニターを取得して各フレームを矩形にクロップする。
-// Screen recording via WGC → H.264/MP4. Fullscreen sends frames as-is; region recording
-// captures the monitor and crops each frame to the selected rectangle.
+// 画面録画：Windowsは Windows Graphics Capture (WGC) 、macOSは ScreenCaptureKit の
+// SCRecordingOutput（ハードウェアエンコードで直接MP4へ書き出す）でモニターを取得する。
+// 全画面はモニターそのまま、領域録画はモニター内の矩形だけを対象にする。
+// ウィンドウ管理・保存/破棄まわりはOS非依存の共通コード。
+// Screen recording: Windows uses Windows Graphics Capture (WGC); macOS uses ScreenCaptureKit's
+// SCRecordingOutput (hardware-encodes straight to MP4). Fullscreen records the whole monitor;
+// region recording targets just a rectangle within it. Window management and save/discard are
+// shared, OS-independent code.
 
-use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tauri::{
     AppHandle, Emitter, EventTarget, Manager, PhysicalPosition, PhysicalSize, WebviewUrl,
     WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
+
+#[cfg(windows)]
+use std::ffi::c_void;
+#[cfg(windows)]
+use std::time::Instant;
+#[cfg(windows)]
 use windows::Win32::Foundation::POINT;
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+#[cfg(windows)]
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
+#[cfg(windows)]
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
 };
+#[cfg(windows)]
 use windows_capture::frame::Frame;
+#[cfg(windows)]
 use windows_capture::graphics_capture_api::InternalCaptureControl;
+#[cfg(windows)]
 use windows_capture::monitor::Monitor;
+#[cfg(windows)]
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
+#[cfg(target_os = "macos")]
+use screencapturekit::prelude::*;
+#[cfg(target_os = "macos")]
+use screencapturekit::recording_output::{
+    RecordingCallbacks, SCRecordingOutput, SCRecordingOutputCodec, SCRecordingOutputConfiguration,
+};
+
+#[cfg(windows)]
 type RecError = Box<dyn std::error::Error + Send + Sync>;
 
 /// クロップ矩形（モニター左上基準・物理px・偶数整列済み）/ Crop rect (monitor-relative, physical px, even-aligned)
@@ -38,7 +62,13 @@ pub struct CropRect {
     pub h: u32,
 }
 
+// ============================================================
+// Windows: Windows Graphics Capture エンジン
+// Windows: Windows Graphics Capture engine
+// ============================================================
+
 /// 録画開始時にハンドラへ渡す情報 / Passed to the handler on start
+#[cfg(windows)]
 #[derive(Clone)]
 pub struct RecordFlags {
     path: String,
@@ -48,6 +78,7 @@ pub struct RecordFlags {
 }
 
 /// WGCのフレームを受け取りエンコーダへ流すハンドラ / Receives WGC frames and feeds the encoder
+#[cfg(windows)]
 pub struct Recorder {
     // 外部停止（on_closed）でも確実に finish できるよう Option で保持
     // Hold as Option so we can finish() even on external stop (on_closed)
@@ -61,6 +92,7 @@ pub struct Recorder {
     out_buf: Vec<u8>,
 }
 
+#[cfg(windows)]
 impl GraphicsCaptureApiHandler for Recorder {
     type Flags = RecordFlags;
     type Error = RecError;
@@ -147,11 +179,252 @@ impl GraphicsCaptureApiHandler for Recorder {
     }
 }
 
+#[cfg(windows)]
 type RecControl = CaptureControl<Recorder, RecError>;
 
-/// 録画中の状態（停止用のCaptureControlと出力先を保持） / Active recording state
+/// 絶対座標の点が乗っているモニターを取得 / Resolve the monitor that contains an absolute point
+#[cfg(windows)]
+fn monitor_at(point: (i32, i32)) -> Result<Monitor, String> {
+    let hmon = unsafe {
+        MonitorFromPoint(
+            POINT {
+                x: point.0,
+                y: point.1,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        )
+    };
+    if hmon.0.is_null() {
+        return Err("モニターの特定に失敗 / could not resolve monitor".into());
+    }
+    Ok(Monitor::from_raw_hmonitor(hmon.0 as *mut c_void))
+}
+
+/// 録画を開始する。Fullscreen で全画面、Region でそのモニターの矩形のみ。保存先パスを返す。
+/// Begin recording. Fullscreen records the primary monitor; Region records only that rectangle.
+#[cfg(windows)]
+fn begin_recording(app: &AppHandle, target: RecordTarget) -> Result<String, String> {
+    let state = app.state::<RecorderState>();
+    if state.0.lock().unwrap().is_some() {
+        return Err("既に録画中です / already recording".into());
+    }
+
+    // 録画対象のモニターと、矩形の絶対座標（黄色枠用）/ Target monitor and the rect's absolute origin (for the frame)
+    let (monitor, crop, abs) = match target {
+        RecordTarget::Fullscreen => (
+            Monitor::primary().map_err(|e| format!("モニター取得に失敗: {e}"))?,
+            None,
+            None,
+        ),
+        RecordTarget::Region { abs, crop } => {
+            (monitor_at((abs.0 + 1, abs.1 + 1))?, Some(crop), Some(abs))
+        }
+    };
+    let mw = monitor.width().map_err(|e| e.to_string())?;
+    let mh = monitor.height().map_err(|e| e.to_string())?;
+
+    // 出力サイズと色形式を決める（H.264は偶数サイズ必須）
+    // Decide output size and color format (H.264 needs even dimensions)
+    let (out_w, out_h, color, crop) = match crop {
+        Some(c) => {
+            let x = c.x.min(mw.saturating_sub(2));
+            let y = c.y.min(mh.saturating_sub(2));
+            let w = (c.w.min(mw - x)) & !1;
+            let h = (c.h.min(mh - y)) & !1;
+            let w = w.max(2);
+            let h = h.max(2);
+            (w, h, ColorFormat::Bgra8, Some(CropRect { x, y, w, h }))
+        }
+        None => (mw & !1, mh & !1, ColorFormat::Rgba8, None),
+    };
+
+    let dir = recordings_dir(app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("保存先を作成できません: {e}"))?;
+    // 履歴と時系列で並ぶよう静止画と同じ命名規則（auracap_<日時>）にする
+    // Same naming as stills (auracap_<timestamp>) so it sorts chronologically in history
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let path = dir.join(format!("auracap_{stamp}.mp4"));
+
+    let flags = RecordFlags {
+        path: path.to_string_lossy().to_string(),
+        out_w,
+        out_h,
+        crop,
+    };
+    let settings = Settings::new(
+        monitor,
+        CursorCaptureSettings::Default,
+        // WGCの黄色枠はモニター全体に出るため無効化し、自前で選択矩形を囲む
+        // Disable WGC's yellow border (it spans the whole monitor); we draw our own around the rect
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default,
+        // フレームレートを約30fpsに制限（高リフレッシュ環境でのCPU/メモリ負荷を抑える）
+        // Cap to ~30fps to curb CPU/memory load on high-refresh displays
+        MinimumUpdateIntervalSettings::Custom(Duration::from_millis(33)),
+        DirtyRegionSettings::Default,
+        color,
+        flags,
+    );
+
+    let control =
+        Recorder::start_free_threaded(settings).map_err(|e| format!("録画開始に失敗: {e}"))?;
+    *state.0.lock().unwrap() = Some(Active {
+        control,
+        path: path.clone(),
+        has_frame: abs.is_some(),
+    });
+    // 領域録画なら選択矩形を黄色枠で囲む / Draw the yellow frame around the rect for region recording
+    if let Some((ax, ay)) = abs {
+        show_rec_frame(app, ax, ay, out_w, out_h);
+    }
+    let _ = app.emit("recording-state", true);
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ============================================================
+// macOS: ScreenCaptureKit エンジン
+// macOS: ScreenCaptureKit engine
+// ============================================================
+
+/// 録画を開始する。Fullscreen で全画面、Region でそのモニターの矩形のみ。保存先パスを返す。
+/// Begin recording. Fullscreen records the primary monitor; Region records only that rectangle.
+#[cfg(target_os = "macos")]
+fn begin_recording(app: &AppHandle, target: RecordTarget) -> Result<String, String> {
+    let state = app.state::<RecorderState>();
+    if state.0.lock().unwrap().is_some() {
+        return Err("既に録画中です / already recording".into());
+    }
+
+    // 録画対象のモニターと、矩形の絶対座標（黄色枠用）/ Target monitor and the rect's absolute origin (for the frame)
+    let (monitor, crop, abs) = match target {
+        RecordTarget::Fullscreen => {
+            let m = xcap::Monitor::all()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|m| m.is_primary().unwrap_or(false))
+                .ok_or("プライマリモニターが見つかりません / primary monitor not found")?;
+            (m, None, None)
+        }
+        RecordTarget::Region { abs, crop } => {
+            let m = xcap::Monitor::from_point(abs.0 + 1, abs.1 + 1).map_err(|e| e.to_string())?;
+            (m, Some(crop), Some(abs))
+        }
+    };
+
+    // xcapのMonitor寸法・スケールから物理pxの実寸を出す（他のmacOS対応箇所と同じ変換）
+    // Derive physical-px dimensions from xcap's monitor size & scale (same conversion used elsewhere for macOS)
+    let scale = monitor.scale_factor().map_err(|e| e.to_string())?;
+    let mw = (monitor.width().map_err(|e| e.to_string())? as f32 * scale).round() as u32;
+    let mh = (monitor.height().map_err(|e| e.to_string())? as f32 * scale).round() as u32;
+    let display_id = monitor.id().map_err(|e| e.to_string())?;
+
+    // 出力サイズを決める（H.264は偶数サイズ必須）/ Decide output size (H.264 needs even dimensions)
+    let (out_w, out_h, crop) = match crop {
+        Some(c) => {
+            let x = c.x.min(mw.saturating_sub(2));
+            let y = c.y.min(mh.saturating_sub(2));
+            let w = ((c.w.min(mw - x)) & !1).max(2);
+            let h = ((c.h.min(mh - y)) & !1).max(2);
+            (w, h, Some(CropRect { x, y, w, h }))
+        }
+        None => (mw & !1, mh & !1, None),
+    };
+
+    let dir = recordings_dir(app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("保存先を作成できません: {e}"))?;
+    // 履歴と時系列で並ぶよう静止画と同じ命名規則（auracap_<日時>）にする
+    // Same naming as stills (auracap_<timestamp>) so it sorts chronologically in history
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let path = dir.join(format!("auracap_{stamp}.mp4"));
+
+    // ScreenCaptureKitのsource_rectはxcapと同じくディスプレイローカルのポイント単位
+    // ScreenCaptureKit's source_rect is display-local points, same unit as xcap
+    let source_rect = crop.map(|c| {
+        CGRect::new(
+            f64::from(c.x) / f64::from(scale),
+            f64::from(c.y) / f64::from(scale),
+            f64::from(c.w) / f64::from(scale),
+            f64::from(c.h) / f64::from(scale),
+        )
+    });
+
+    let content = SCShareableContent::get().map_err(|e| e.to_string())?;
+    let display = content
+        .displays()
+        .into_iter()
+        .find(|d| d.display_id() == display_id)
+        .ok_or("対象ディスプレイが見つかりません / target display not found")?;
+    let filter = SCContentFilter::create()
+        .with_display(&display)
+        .with_excluding_windows(&[])
+        .build();
+    let mut config = SCStreamConfiguration::new()
+        .with_width(out_w)
+        .with_height(out_h)
+        .with_fps(30)
+        .with_captures_audio(false)
+        .with_shows_cursor(true);
+    if let Some(rect) = source_rect {
+        config = config.with_source_rect(rect);
+    }
+
+    let rec_config = SCRecordingOutputConfiguration::new()
+        .with_output_url(&path)
+        .with_video_codec(SCRecordingOutputCodec::H264);
+
+    // 確定（recording_did_finish）は非同期コールバックで届くため、stop_recording側で
+    // 同期的に待てるようチャンネルで橋渡しする
+    // Finalization (recording_did_finish) arrives via an async callback; bridge it through a
+    // channel so stop_recording can wait for it synchronously
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let fail_tx = finish_tx.clone();
+    let delegate = RecordingCallbacks::new()
+        .on_finish(move || {
+            let _ = finish_tx.send(Ok(()));
+        })
+        .on_fail(move |e| {
+            let _ = fail_tx.send(Err(e));
+        });
+    let recording_output = SCRecordingOutput::new_with_delegate(&rec_config, delegate)
+        .ok_or("録画出力の作成に失敗 / failed to create recording output")?;
+
+    let stream = SCStream::new(&filter, &config);
+    stream
+        .add_recording_output(&recording_output)
+        .map_err(|e| format!("録画出力の追加に失敗: {e}"))?;
+    stream
+        .start_capture()
+        .map_err(|e| format!("録画開始に失敗: {e}"))?;
+
+    *state.0.lock().unwrap() = Some(Active {
+        stream,
+        recording_output,
+        finish_rx,
+        path: path.clone(),
+        has_frame: abs.is_some(),
+    });
+    // 領域録画なら選択矩形を黄色枠で囲む / Draw the yellow frame around the rect for region recording
+    if let Some((ax, ay)) = abs {
+        show_rec_frame(app, ax, ay, out_w, out_h);
+    }
+    let _ = app.emit("recording-state", true);
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ============================================================
+// 共通 / Shared
+// ============================================================
+
+/// 録画中の状態（停止用のハンドルと出力先を保持） / Active recording state
 pub struct Active {
+    #[cfg(windows)]
     control: RecControl,
+    #[cfg(target_os = "macos")]
+    stream: SCStream,
+    #[cfg(target_os = "macos")]
+    recording_output: SCRecordingOutput,
+    #[cfg(target_os = "macos")]
+    finish_rx: std::sync::mpsc::Receiver<Result<(), String>>,
     path: PathBuf,
     has_frame: bool,
 }
@@ -264,103 +537,6 @@ fn hide_rec_frame(app: &AppHandle) {
     });
 }
 
-/// 絶対座標の点が乗っているモニターを取得 / Resolve the monitor that contains an absolute point
-fn monitor_at(point: (i32, i32)) -> Result<Monitor, String> {
-    let hmon = unsafe {
-        MonitorFromPoint(
-            POINT {
-                x: point.0,
-                y: point.1,
-            },
-            MONITOR_DEFAULTTONEAREST,
-        )
-    };
-    if hmon.0.is_null() {
-        return Err("モニターの特定に失敗 / could not resolve monitor".into());
-    }
-    Ok(Monitor::from_raw_hmonitor(hmon.0 as *mut c_void))
-}
-
-/// 録画を開始する。Fullscreen で全画面、Region でそのモニターの矩形のみ。保存先パスを返す。
-/// Begin recording. Fullscreen records the primary monitor; Region records only that rectangle.
-fn begin_recording(app: &AppHandle, target: RecordTarget) -> Result<String, String> {
-    let state = app.state::<RecorderState>();
-    if state.0.lock().unwrap().is_some() {
-        return Err("既に録画中です / already recording".into());
-    }
-
-    // 録画対象のモニターと、矩形の絶対座標（黄色枠用）/ Target monitor and the rect's absolute origin (for the frame)
-    let (monitor, crop, abs) = match target {
-        RecordTarget::Fullscreen => (
-            Monitor::primary().map_err(|e| format!("モニター取得に失敗: {e}"))?,
-            None,
-            None,
-        ),
-        RecordTarget::Region { abs, crop } => {
-            (monitor_at((abs.0 + 1, abs.1 + 1))?, Some(crop), Some(abs))
-        }
-    };
-    let mw = monitor.width().map_err(|e| e.to_string())?;
-    let mh = monitor.height().map_err(|e| e.to_string())?;
-
-    // 出力サイズと色形式を決める（H.264は偶数サイズ必須）
-    // Decide output size and color format (H.264 needs even dimensions)
-    let (out_w, out_h, color, crop) = match crop {
-        Some(c) => {
-            let x = c.x.min(mw.saturating_sub(2));
-            let y = c.y.min(mh.saturating_sub(2));
-            let w = (c.w.min(mw - x)) & !1;
-            let h = (c.h.min(mh - y)) & !1;
-            let w = w.max(2);
-            let h = h.max(2);
-            (w, h, ColorFormat::Bgra8, Some(CropRect { x, y, w, h }))
-        }
-        None => (mw & !1, mh & !1, ColorFormat::Rgba8, None),
-    };
-
-    let dir = recordings_dir(app);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("保存先を作成できません: {e}"))?;
-    // 履歴と時系列で並ぶよう静止画と同じ命名規則（auracap_<日時>）にする
-    // Same naming as stills (auracap_<timestamp>) so it sorts chronologically in history
-    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let path = dir.join(format!("auracap_{stamp}.mp4"));
-
-    let flags = RecordFlags {
-        path: path.to_string_lossy().to_string(),
-        out_w,
-        out_h,
-        crop,
-    };
-    let settings = Settings::new(
-        monitor,
-        CursorCaptureSettings::Default,
-        // WGCの黄色枠はモニター全体に出るため無効化し、自前で選択矩形を囲む
-        // Disable WGC's yellow border (it spans the whole monitor); we draw our own around the rect
-        DrawBorderSettings::WithoutBorder,
-        SecondaryWindowSettings::Default,
-        // フレームレートを約30fpsに制限（高リフレッシュ環境でのCPU/メモリ負荷を抑える）
-        // Cap to ~30fps to curb CPU/memory load on high-refresh displays
-        MinimumUpdateIntervalSettings::Custom(Duration::from_millis(33)),
-        DirtyRegionSettings::Default,
-        color,
-        flags,
-    );
-
-    let control =
-        Recorder::start_free_threaded(settings).map_err(|e| format!("録画開始に失敗: {e}"))?;
-    *state.0.lock().unwrap() = Some(Active {
-        control,
-        path: path.clone(),
-        has_frame: abs.is_some(),
-    });
-    // 領域録画なら選択矩形を黄色枠で囲む / Draw the yellow frame around the rect for region recording
-    if let Some((ax, ay)) = abs {
-        show_rec_frame(app, ax, ay, out_w, out_h);
-    }
-    let _ = app.emit("recording-state", true);
-    Ok(path.to_string_lossy().to_string())
-}
-
 /// 遅延後に録画を開始する（別スレッド）。停止できるよう開始後にメイン窓を表示する。
 /// Start recording after a delay (background thread); re-show the main window so it can be stopped.
 fn start_delayed(app: &AppHandle, target: RecordTarget, delay_secs: u32) {
@@ -429,11 +605,29 @@ pub fn stop_recording(app: AppHandle) -> Result<String, String> {
     if active.has_frame {
         hide_rec_frame(&app);
     }
-    // 停止するとセッションが閉じ、on_closed で MP4 が確定する / Stopping closes the session; on_closed finalizes the file
+    // 停止するとセッションが閉じ、MP4 が確定する / Stopping closes the session and finalizes the file
+    #[cfg(windows)]
     active
         .control
         .stop()
         .map_err(|e| format!("録画停止に失敗: {e}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        active
+            .stream
+            .stop_capture()
+            .map_err(|e| format!("録画停止に失敗: {e}"))?;
+        let _ = active.stream.remove_recording_output(&active.recording_output);
+        // ファイルへの確定（recording_did_finish）を待つ。タイムアウトしても
+        // 大抵は書き出し済みなので、警告のみでプレビューは開く。
+        // Wait for the file to finalize (recording_did_finish). If it times out, the file is
+        // usually already written, so just warn and still open the preview.
+        match active.finish_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("[auracap] recording finished with error: {e}"),
+            Err(_) => eprintln!("[auracap] recording finish callback timed out"),
+        }
+    }
     let _ = app.emit("recording-state", false);
     // 静止画のエディタと同様、別ウィンドウのプレビューで保存/破棄させる
     // Like the still editor, open the clip in a separate preview window to save/discard
