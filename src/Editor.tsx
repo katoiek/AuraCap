@@ -12,10 +12,12 @@ type Tool = "select" | "rect" | "arrow" | "highlight" | "blur" | "text" | "badge
 type RectShape = { x: number; y: number; w: number; h: number };
 type Obj =
   | ({ id: string; kind: "rect"; color: string } & RectShape)
-  | ({ id: string; kind: "highlight"; color: string } & RectShape)
+  | ({ id: string; kind: "highlight"; color: string; opacity: number } & RectShape)
   | ({ id: string; kind: "blur" } & RectShape)
   | { id: string; kind: "arrow"; x1: number; y1: number; x2: number; y2: number; color: string }
-  | { id: string; kind: "text"; x: number; y: number; text: string; color: string }
+  // color = 背景色（角丸の吹き出し）、textColor = 文字色（白/黒）
+  // color = background (rounded pill), textColor = font color (white/black)
+  | { id: string; kind: "text"; x: number; y: number; text: string; color: string; textColor: string }
   | { id: string; kind: "badge"; x: number; y: number; n: number; color: string };
 
 type Gesture =
@@ -30,6 +32,50 @@ const COLORS = ["#fbbf24", "#ef4444", "#3b82f6", "#22c55e", "#18181b", "#ffffff"
 
 // バッジの数字色：白バッジでは黒、それ以外は白 / Badge digit color: black on white badges, white otherwise
 const badgeTextColor = (bg: string) => (bg.toLowerCase() === "#ffffff" ? "#18181b" : "#ffffff");
+
+const TEXT_FONT = '"Yu Gothic UI", "Segoe UI", sans-serif';
+// テキスト吹き出しの余白・角丸半径（フォントサイズに比例） / Text-bubble padding & corner radius (proportional to font size)
+const textBubbleMetrics = (fontSize: number) => ({
+  padding: fontSize * 0.35,
+  radius: fontSize * 0.3,
+});
+
+// 複数行テキストの描画サイズを計測する（SVGプレビューとPNG書き出しで同じ余白計算に使う）。
+// フォントごとにascent/descentの実測値が異なる（"Yu Gothic UI"/"Segoe UI"はmacOSに存在せず
+// フォールバックフォントになる等）ため、固定倍率ではなくmeasureTextの実測値を使う。
+// 使い捨てのオフスクリーンcanvasを使い回す。
+// Measure multi-line text (shared by the SVG preview and PNG export for identical padding math).
+// Ascent/descent vary by the font actually rendered (e.g. "Yu Gothic UI"/"Segoe UI" don't exist
+// on macOS and fall back to something else), so use measureText's real metrics instead of a
+// fixed multiplier. Reuses a throwaway offscreen canvas for measureText.
+let measureCtx: CanvasRenderingContext2D | null = null;
+function measureTextLines(
+  lines: string[],
+  fontSize: number,
+): { width: number; height: number; ascent: number; lineHeight: number } {
+  const fallbackAscent = fontSize * 0.8;
+  const fallbackDescent = fontSize * 0.25;
+  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+  const ctx = measureCtx;
+  if (!ctx) {
+    const lineHeight = (fallbackAscent + fallbackDescent) * 1.15;
+    return { width: fontSize, height: lines.length * lineHeight, ascent: fallbackAscent, lineHeight };
+  }
+  ctx.font = `bold ${fontSize}px ${TEXT_FONT}`;
+  const width = Math.max(...lines.map((l) => ctx.measureText(l || " ").width), 1);
+  // 行の内容（降下文字の有無等）で行送りがばらつかないよう、固定の参照文字列で測る
+  // Measure a fixed reference string so line spacing doesn't jitter based on descenders etc.
+  const ref = ctx.measureText("Mjpqy国あ");
+  const ascent = ref.actualBoundingBoxAscent || fallbackAscent;
+  const descent = ref.actualBoundingBoxDescent || fallbackDescent;
+  const lineHeight = (ascent + descent) * 1.15;
+  // 行間の余白（1.15倍分）は行と行の間だけに使う。1行分の天地にまで掛けると、
+  // 単一行のときに下側だけ余白が余って見た目のバランスが崩れるため
+  // The 1.15 leading only applies *between* lines. Multiplying the whole block by it
+  // (including the outermost line) left extra slack stacked at the bottom for single-line text
+  const height = ascent + descent + (lines.length - 1) * lineHeight;
+  return { width, height, ascent, lineHeight };
+}
 
 const TOOLS: { tool: Tool; label: string }[] = [
   { tool: "select", label: "選択 / 移動" },
@@ -115,9 +161,14 @@ function Editor() {
   const [selected, setSelected] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [color, setColor] = useState(COLORS[0]);
+  // テキスト吹き出しの文字色（白/黒の2択） / Text-bubble font color (white or black only)
+  const [textColor, setTextColor] = useState("#ffffff");
   // 線幅の倍率（細0.6 / 中1.0 / 太1.7）。基準線幅に掛けて全体へ反映
   // Line-width multiplier (thin/medium/thick); multiplied into the base stroke globally
   const [strokeMul, setStrokeMul] = useState(1);
+  // ハイライトの不透明度（0〜1）。新規作成時の既定値であり、スライダーで0〜100%として編集する
+  // Highlight opacity (0-1). Default for new highlights; edited as 0-100% via the slider
+  const [highlightOpacity, setHighlightOpacity] = useState(0.45);
   const [fitScale, setFitScale] = useState(1);
   // 表示ズーム。nullはフィット表示（ウィンドウに合わせる） / Display zoom; null = fit to viewport
   const [zoom, setZoom] = useState<number | null>(null);
@@ -342,23 +393,29 @@ function Editor() {
         ctx.lineWidth = stroke;
         ctx.strokeRect(o.x, o.y, o.w, o.h);
       } else if (o.kind === "highlight") {
+        // 通常合成：不透明度100%で完全な塗りつぶしになるようにする（multiplyだと下地が透けて残る）
+        // Normal blending so 100% opacity is a fully solid fill (multiply would still let the base show through)
         ctx.save();
-        ctx.globalCompositeOperation = "multiply";
         ctx.fillStyle = o.color;
-        ctx.globalAlpha = 0.45;
+        ctx.globalAlpha = o.opacity;
         ctx.fillRect(o.x, o.y, o.w, o.h);
         ctx.restore();
       } else if (o.kind === "arrow") {
         drawArrow(ctx, o.x1, o.y1, o.x2, o.y2, o.color, stroke);
       } else if (o.kind === "text") {
+        const lines = o.text.split("\n");
+        const { width, height, ascent, lineHeight } = measureTextLines(lines, fontSize);
+        const { padding, radius } = textBubbleMetrics(fontSize);
         ctx.save();
-        ctx.font = `bold ${fontSize}px "Yu Gothic UI", "Segoe UI", sans-serif`;
-        ctx.textBaseline = "top";
-        ctx.shadowColor = "rgba(0,0,0,0.45)";
-        ctx.shadowBlur = 3;
         ctx.fillStyle = o.color;
-        o.text.split("\n").forEach((line, i) => {
-          ctx.fillText(line, o.x, o.y + i * fontSize * 1.25);
+        ctx.beginPath();
+        ctx.roundRect(o.x - padding, o.y - padding, width + padding * 2, height + padding * 2, radius);
+        ctx.fill();
+        ctx.font = `bold ${fontSize}px ${TEXT_FONT}`;
+        ctx.textBaseline = "alphabetic";
+        ctx.fillStyle = o.textColor;
+        lines.forEach((line, i) => {
+          ctx.fillText(line, o.x, o.y + ascent + i * lineHeight);
         });
         ctx.restore();
       } else if (o.kind === "badge") {
@@ -624,28 +681,31 @@ function Editor() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (textEdit) return; // テキスト入力中は奪わない / Don't steal keys while typing
+      // macOSはCmd（metaKey）、Windows/LinuxはCtrlが修飾キーの慣例のため両方を受け付ける
+      // macOS uses Cmd (metaKey), Windows/Linux use Ctrl; accept either as the modifier
+      const mod = e.ctrlKey || e.metaKey;
       if (e.key === "Escape") setSelected(null);
       if ((e.key === "Delete" || e.key === "Backspace") && selected) {
         pushUndo();
         setObjects((os) => os.filter((o) => o.id !== selected));
         setSelected(null);
       }
-      if (e.ctrlKey && e.key.toLowerCase() === "z") undo();
-      if (e.ctrlKey && e.key.toLowerCase() === "c") doCopy();
-      if (e.ctrlKey && e.key.toLowerCase() === "s") {
+      if (mod && e.key.toLowerCase() === "z") undo();
+      if (mod && e.key.toLowerCase() === "c") doCopy();
+      if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         doSave();
       }
       // 表示ズーム / Display zoom
-      if (e.ctrlKey && (e.key === "+" || e.key === "=" || e.key === ";")) {
+      if (mod && (e.key === "+" || e.key === "=" || e.key === ";")) {
         e.preventDefault();
         stepZoom(1);
       }
-      if (e.ctrlKey && e.key === "-") {
+      if (mod && e.key === "-") {
         e.preventDefault();
         stepZoom(-1);
       }
-      if (e.ctrlKey && e.key === "0") {
+      if (mod && e.key === "0") {
         e.preventDefault();
         setZoom(null);
       }
@@ -669,11 +729,11 @@ function Editor() {
         );
       } else if (value) {
         pushUndo();
-        setObjects((os) => [...os, { id: nextId(), kind: "text", x: te.x, y: te.y, text: value, color }]);
+        setObjects((os) => [...os, { id: nextId(), kind: "text", x: te.x, y: te.y, text: value, color, textColor }]);
       }
       return null;
     });
-  }, [color, pushUndo]);
+  }, [color, textColor, pushUndo]);
 
   const onStagePointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || !imgSize) return;
@@ -686,6 +746,22 @@ function Editor() {
     const objId = target.dataset.obj;
     const handle = target.dataset.handle;
     const cropHandle = target.dataset.crophandle;
+
+    // テキストツールは常にここで新規作成し、ポインタ捕捉はしない。またpreventDefault()で
+    // 「フォーカス不可な要素へのmousedownは既存フォーカスを外す」というブラウザの既定動作を
+    // 抑止する。抑止しないと、新規<textarea>へautoFocusした直後にこの既定動作が働いて
+    // 即blur→空のまま確定・消去されてしまう。
+    // The text tool always creates a new box here, without capturing the pointer, and calls
+    // preventDefault() to suppress the browser's default "mousedown on a non-focusable element
+    // blurs the current focus" behavior. Without this, that default action fires right after
+    // the new <textarea> gets autoFocus, immediately blurring it and committing the (empty)
+    // text before the user can type.
+    if (tool === "text") {
+      e.preventDefault();
+      setSelected(null);
+      setTextEdit({ id: null, x: p.x, y: p.y, value: "" });
+      return;
+    }
 
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
 
@@ -724,10 +800,6 @@ function Editor() {
 
     // 背景：ツールに応じて新規作成 / Background: create per active tool
     setSelected(null);
-    if (tool === "text") {
-      setTextEdit({ id: null, x: p.x, y: p.y, value: "" });
-      return;
-    }
     if (tool === "badge") {
       pushUndo();
       const n = objects.reduce((m, o) => (o.kind === "badge" ? Math.max(m, o.n) : m), 0) + 1;
@@ -750,7 +822,11 @@ function Editor() {
         const base = { id, x: p.x, y: p.y, w: 0, h: 0 } as const;
         setObjects((os) => [
           ...os,
-          tool === "blur" ? { ...base, kind: "blur" } : { ...base, kind: tool, color },
+          tool === "blur"
+            ? { ...base, kind: "blur" }
+            : tool === "highlight"
+              ? { ...base, kind: "highlight", color, opacity: highlightOpacity }
+              : { ...base, kind: tool, color },
         ]);
       }
       setSelected(id);
@@ -868,6 +944,28 @@ function Editor() {
     }
   };
 
+  // ハイライトの不透明度を選ぶ（0〜1）。選択中のハイライトがあればその不透明度も変更する
+  // Pick highlight opacity (0-1); also update the selected highlight's opacity if any
+  const chooseHighlightOpacity = (v: number) => {
+    setHighlightOpacity(v);
+    if (selected) {
+      pushUndo();
+      setObjects((os) =>
+        os.map((o) => (o.id === selected && o.kind === "highlight" ? { ...o, opacity: v } : o)),
+      );
+    }
+  };
+
+  // テキストの文字色（白/黒）を選ぶ。選択中のテキストがあればその文字色も変更する
+  // Pick the text font color (white/black); also update the selected text's color if any
+  const chooseTextColor = (v: string) => {
+    setTextColor(v);
+    if (selected) {
+      pushUndo();
+      setObjects((os) => os.map((o) => (o.id === selected && o.kind === "text" ? { ...o, textColor: v } : o)));
+    }
+  };
+
   // スポイト: ウィンドウ上の任意の色を吸い取る（WebView2のEyeDropper API）
   // Eyedropper: sample any color on the window via WebView2's EyeDropper API
   const pickWithEyeDropper = async () => {
@@ -971,6 +1069,44 @@ function Editor() {
         >
           🧪
         </button>
+        {/* ハイライトの不透明度（ハイライトツール選択中、またはハイライトを選択中のみ表示） */}
+        {/* Highlight opacity (shown only while the highlight tool or a highlight object is active) */}
+        {(tool === "highlight" || selectedObj?.kind === "highlight") && (
+          <label className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300" title="ハイライトの不透明度">
+            <span>不透明度</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round((selectedObj?.kind === "highlight" ? selectedObj.opacity : highlightOpacity) * 100)}
+              onChange={(e) => chooseHighlightOpacity(Number(e.target.value) / 100)}
+              className="w-20 accent-[var(--accent)]"
+            />
+            <span className="w-8 text-right font-mono">
+              {Math.round((selectedObj?.kind === "highlight" ? selectedObj.opacity : highlightOpacity) * 100)}%
+            </span>
+          </label>
+        )}
+        {/* テキストの文字色（白/黒）。カラースウォッチは背景色として使う */}
+        {/* Text font color (white/black); the color swatches act as the background */}
+        {(tool === "text" || selectedObj?.kind === "text") && (
+          <div className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300">
+            <span>文字色</span>
+            {["#ffffff", "#000000"].map((c) => (
+              <button
+                key={c}
+                title={c === "#ffffff" ? "白文字" : "黒文字"}
+                onClick={() => chooseTextColor(c)}
+                className={`h-6 w-6 rounded-full border-2 ${
+                  (selectedObj?.kind === "text" ? selectedObj.textColor : textColor) === c
+                    ? "border-[var(--accent)]"
+                    : "border-zinc-600"
+                }`}
+                style={{ backgroundColor: c }}
+              />
+            ))}
+          </div>
+        )}
         <div className="mx-2 h-6 w-px bg-zinc-700" />
         {/* Smart Redact（ローカルOCR） / Smart Redact (local OCR) */}
         <button
@@ -1120,7 +1256,7 @@ function Editor() {
                     );
                   if (o.kind === "highlight")
                     return (
-                      <rect key={o.id} {...common} x={o.x} y={o.y} width={o.w} height={o.h} fill={o.color} fillOpacity={0.45} style={{ ...common.style, mixBlendMode: "multiply" }} />
+                      <rect key={o.id} {...common} x={o.x} y={o.y} width={o.w} height={o.h} fill={o.color} fillOpacity={o.opacity} />
                     );
                   if (o.kind === "blur")
                     return (
@@ -1137,16 +1273,48 @@ function Editor() {
                       </g>
                     );
                   }
-                  if (o.kind === "text")
+                  if (o.kind === "text") {
+                    const lines = o.text.split("\n");
+                    const { width, height, ascent, lineHeight } = measureTextLines(lines, fontSize);
+                    const { padding, radius } = textBubbleMetrics(fontSize);
                     return (
-                      <text key={o.id} {...common} x={o.x} y={o.y} fill={o.color} fontSize={fontSize} fontWeight="bold" dominantBaseline="hanging" fontFamily='"Yu Gothic UI", "Segoe UI", sans-serif' style={{ ...common.style, paintOrder: "stroke" }} stroke="rgba(0,0,0,0.35)" strokeWidth={stroke / 3}>
-                        {o.text.split("\n").map((line, i) => (
-                          <tspan key={i} x={o.x} dy={i === 0 ? 0 : fontSize * 1.25}>
-                            {line}
-                          </tspan>
-                        ))}
-                      </text>
+                      <g key={o.id}>
+                        <rect
+                          {...common}
+                          x={o.x - padding}
+                          y={o.y - padding}
+                          width={width + padding * 2}
+                          height={height + padding * 2}
+                          rx={radius}
+                          ry={radius}
+                          fill={o.color}
+                        />
+                        {/* ascentで実測ベースにベースラインを合わせる（フォントごとの上端の
+                            見え方が違ってもボックスからはみ出さないようにするため） */}
+                        {/* Baseline placed via the measured ascent, so text stays inside the
+                            box regardless of how a given font's top metrics render */}
+                        <text
+                          {...common}
+                          x={o.x}
+                          y={o.y + ascent}
+                          fill={o.textColor}
+                          fontSize={fontSize}
+                          fontWeight="bold"
+                          fontFamily={TEXT_FONT}
+                        >
+                          {lines.map((line, i) => (
+                            // SVGのヒットテストは親<text>ではなく子<tspan>を対象にすることがあるため
+                            // data-objをtspanにも付与する（付けないと選択・移動できない）
+                            // SVG hit-testing often targets the child <tspan> rather than the parent
+                            // <text>, so data-obj must be set on the tspan too (otherwise select/move breaks)
+                            <tspan key={i} data-obj={o.id} x={o.x} dy={i === 0 ? 0 : lineHeight}>
+                              {line}
+                            </tspan>
+                          ))}
+                        </text>
+                      </g>
                     );
+                  }
                   if (o.kind === "badge")
                     return (
                       <g key={o.id} {...common}>
@@ -1229,14 +1397,22 @@ function Editor() {
                   }}
                   onBlur={commitText}
                   placeholder="テキスト… (Enterで確定)"
-                  className="absolute resize-none rounded border border-[var(--accent)] bg-zinc-900/80 px-1 py-0.5 font-bold outline-none"
+                  className="absolute resize-none border-2 border-[var(--accent)] outline-none"
                   style={{
-                    left: textEdit.x * scale - 2,
-                    top: textEdit.y * scale - 2,
+                    left: textEdit.x * scale - textBubbleMetrics(fontSize).padding * scale,
+                    top: textEdit.y * scale - textBubbleMetrics(fontSize).padding * scale,
                     minWidth: 160,
-                    color,
+                    backgroundColor: color,
+                    color: textColor,
+                    borderRadius: textBubbleMetrics(fontSize).radius * scale,
+                    padding: textBubbleMetrics(fontSize).padding * scale,
                     fontSize: Math.max(12, fontSize * scale),
-                    lineHeight: 1.25,
+                    // 確定後のSVG（ascentベースの実測配置）と行送りを揃える。line-heightの
+                    // 既定の余分な行間（half-leading）が入ると、確定前後で数pxズレて見えるため
+                    // Match the SVG's ascent-based line spacing so the box doesn't visibly
+                    // jump by a few px when the text commits (default line-height half-leading
+                    // would otherwise add a mismatched gap above the first line)
+                    lineHeight: `${measureTextLines(textEdit.value.split("\n"), fontSize).lineHeight * scale}px`,
                   }}
                   rows={Math.max(1, textEdit.value.split("\n").length)}
                 />
