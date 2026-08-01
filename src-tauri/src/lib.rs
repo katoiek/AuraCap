@@ -287,7 +287,12 @@ pub fn run() {
                     _ => {}
                 }
             }
-            let body: Option<Vec<u8>> = monitor_id.and_then(|id| {
+            // sizeはURLクエリ由来なので上限を設ける。無制限だと size*size*4 がu32で
+            // 溢れ、確保サイズと書き込み位置がずれて巨大確保やパニックにつながる。
+            // size comes from the URL query, so cap it: unbounded values overflow the u32
+            // size*size*4 math, desyncing the allocation from the writes (huge alloc / panic).
+            const MAX_LOUPE_SRC: u32 = 256;
+            let body: Option<Vec<u8>> = monitor_id.filter(|_| (1..=MAX_LOUPE_SRC).contains(&size)).and_then(|id| {
                 let state = app.state::<capture::SessionState>();
                 let guard = state.0.lock().unwrap();
                 guard
@@ -402,7 +407,7 @@ pub fn run() {
             capture::pre_create_overlays(app.handle());
             editor::pre_create_editor(app.handle());
             recorder::pre_create_video_editor(app.handle());
-            recorder::pre_create_rec_frame(app.handle());
+            recorder::pre_create_rec_overlays(app.handle());
             // ブラウザ拡張からのフルページキャプチャ受信ブリッジ
             // Local bridge that receives full-page captures from the browser extension
             bridge::start(app.handle());

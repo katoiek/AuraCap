@@ -18,8 +18,6 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 
 #[cfg(windows)]
-use std::ffi::c_void;
-#[cfg(windows)]
 use std::time::Instant;
 #[cfg(windows)]
 use windows::Win32::Foundation::POINT;
@@ -197,7 +195,7 @@ fn monitor_at(point: (i32, i32)) -> Result<Monitor, String> {
     if hmon.0.is_null() {
         return Err("モニターの特定に失敗 / could not resolve monitor".into());
     }
-    Ok(Monitor::from_raw_hmonitor(hmon.0 as *mut c_void))
+    Ok(Monitor::from_raw_hmonitor(hmon.0))
 }
 
 /// 録画を開始する。Fullscreen で全画面、Region でそのモニターの矩形のみ。保存先パスを返す。
@@ -461,6 +459,19 @@ const FRAME_LABELS: [&str; 4] = ["recframe-0", "recframe-1", "recframe-2", "recf
 /// 枠の太さ（物理px）/ Border thickness (physical px)
 const FRAME_THICK: i32 = 3;
 
+/// カウントダウン窓のラベル / Window label for the countdown
+const COUNTDOWN_LABEL: &str = "reccountdown";
+/// カウントダウン窓の一辺（物理px）。枠がこれより小さければ枠に合わせて縮める
+/// Countdown window side length (physical px); shrunk to fit when the frame is smaller
+const COUNTDOWN_SIZE: u32 = 180;
+/// 窓を隠してから画面合成（DWM）に反映されるまでの猶予。
+/// カウントダウンは選択範囲の内側に出るため、これを待たずに録画を始めると
+/// 最初の数フレームに数字が写り込む。capture.rs のウィンドウ退避待ちと同じ理由。
+/// Grace period for a hidden window to leave DWM composition. The countdown sits *inside* the
+/// recorded rect, so starting capture without this bakes the digit into the first frames.
+/// Same reasoning as the window-hide wait in capture.rs.
+const HIDE_SETTLE_MS: u64 = 200;
+
 /// 枠バー窓を生成（不透明・隠し）。中身はテーマ色のdiv（recframe）。
 /// Create a frame-bar window (opaque, hidden); content is a themed solid div (recframe).
 fn create_rec_frame_window(app: &AppHandle, label: &str) -> Result<tauri::WebviewWindow, String> {
@@ -480,14 +491,43 @@ fn create_rec_frame_window(app: &AppHandle, label: &str) -> Result<tauri::Webvie
         .map_err(|e| e.to_string())
 }
 
-/// 起動時に枠バー窓4本を事前生成して常駐させる（録画毎の生成を避け高速化）
-/// Pre-create the 4 frame-bar windows at startup (avoids per-recording creation = fast)
-pub fn pre_create_rec_frame(app: &AppHandle) {
+/// カウントダウン窓を生成（透過・隠し）。中身は数字だけを描く円形バッジ。
+/// Create the countdown window (transparent, hidden); it paints a circular badge with the digit.
+fn create_countdown_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    WebviewWindowBuilder::new(
+        app,
+        COUNTDOWN_LABEL,
+        WebviewUrl::App("index.html?countdown=1".into()),
+    )
+    .title("AuraCap")
+    .decorations(false)
+    .resizable(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .focused(false)
+    .shadow(false)
+    .visible(false)
+    // 角を丸く見せるため窓自体は透過にする / Transparent so the badge can look round
+    .transparent(true)
+    .build()
+    .map_err(|e| e.to_string())
+}
+
+/// 起動時に録画表示用の常駐窓（枠バー4本＋カウントダウン）を事前生成する
+/// （録画毎の生成を避け高速化）
+/// Pre-create the resident recording-overlay windows (4 frame bars + countdown) at startup,
+/// avoiding per-recording creation.
+pub fn pre_create_rec_overlays(app: &AppHandle) {
     for label in FRAME_LABELS {
         if app.get_webview_window(label).is_none() {
             if let Err(e) = create_rec_frame_window(app, label) {
                 eprintln!("[auracap] failed to pre-create rec frame {label}: {e}");
             }
+        }
+    }
+    if app.get_webview_window(COUNTDOWN_LABEL).is_none() {
+        if let Err(e) = create_countdown_window(app) {
+            eprintln!("[auracap] failed to pre-create countdown window: {e}");
         }
     }
 }
@@ -537,13 +577,88 @@ fn hide_rec_frame(app: &AppHandle) {
     });
 }
 
+/// カウントダウンを選択枠の中央に出す / Place the countdown at the center of the selected rect
+fn show_countdown(app: &AppHandle, (x, y, w, h): (i32, i32, u32, u32)) {
+    // 枠からはみ出さないよう一辺を詰める（小さい範囲を録るときの見切れ防止）
+    // Shrink the badge so it never spills out of a small selection
+    let size = COUNTDOWN_SIZE.min(w).min(h).max(48);
+    let cx = x + (w as i32 - size as i32) / 2;
+    let cy = y + (h as i32 - size as i32) / 2;
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let win = match app.get_webview_window(COUNTDOWN_LABEL) {
+            Some(w) => w,
+            None => match create_countdown_window(&app) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("[auracap] countdown create failed: {e}");
+                    return;
+                }
+            },
+        };
+        let _ = win.set_size(PhysicalSize::new(size, size));
+        let _ = win.set_position(PhysicalPosition::new(cx, cy));
+        // 待機中に下のUIを触れなくならないよう当たり判定を抜く / Stay click-through while waiting
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.show();
+    });
+}
+
+fn hide_countdown(app: &AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(w) = app.get_webview_window(COUNTDOWN_LABEL) {
+            let _ = w.hide();
+        }
+    });
+}
+
+/// 録画開始までの残り秒数を枠の中央に出す。呼び出しから戻るまでちょうど `secs` 秒かかる。
+/// 秒の刻みはフロント側のタイマーに任せ、ここでは開始の合図を1回送るだけにする
+/// （毎秒emitする方式だと、1つでも取りこぼすと表示がそこで止まってしまうため）。
+/// Show the remaining seconds at the center of the frame; returns after exactly `secs` seconds.
+/// The per-second ticking is left to a timer in the frontend and only a single start signal is
+/// sent — emitting every second means one dropped event freezes the display.
+fn run_countdown(app: &AppHandle, rect: (i32, i32, u32, u32), secs: u32) {
+    show_countdown(app, rect);
+    let _ = app.emit_to(
+        EventTarget::labeled(COUNTDOWN_LABEL),
+        "countdown-start",
+        secs,
+    );
+    // 窓を畳んで合成から消えるまでの猶予を待ち時間の内側で消化する。
+    // こうすると待ち時間の合計は secs のままで、かつ数字が録画に写り込まない。
+    // Spend the hide-settle grace inside the wait: the total stays exactly `secs` while
+    // guaranteeing the digit has left the screen before capture starts.
+    std::thread::sleep(Duration::from_millis(secs as u64 * 1000 - HIDE_SETTLE_MS));
+    hide_countdown(app);
+    std::thread::sleep(Duration::from_millis(HIDE_SETTLE_MS));
+}
+
 /// 遅延後に録画を開始する（別スレッド）。停止できるよう開始後にメイン窓を表示する。
+/// 領域・ウィンドウ録画では、選択を確定した直後から枠を出したままにし、待機中は残り秒数を
+/// 枠の中央に表示する。枠が消えていると「どこが録られるのか」も「あと何秒か」も分からないまま
+/// 待たされることになるため。
 /// Start recording after a delay (background thread); re-show the main window so it can be stopped.
+/// For region/window recording the frame stays up from the moment the selection is confirmed, with
+/// the remaining seconds shown at its center — otherwise the user waits with no idea what area was
+/// chosen or how long is left.
 fn start_delayed(app: &AppHandle, target: RecordTarget, delay_secs: u32) {
+    // 枠を出す対象の矩形。全画面録画に枠は無いのでNone / The rect to frame; fullscreen has no frame
+    let framed = match &target {
+        RecordTarget::Region { abs, crop } => Some((abs.0, abs.1, crop.w, crop.h)),
+        RecordTarget::Fullscreen => None,
+    };
+    if let Some((x, y, w, h)) = framed {
+        show_rec_frame(app, x, y, w, h);
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         if delay_secs > 0 {
-            std::thread::sleep(Duration::from_secs(delay_secs as u64));
+            match framed {
+                Some(rect) => run_countdown(&app, rect, delay_secs),
+                None => std::thread::sleep(Duration::from_secs(delay_secs as u64)),
+            }
         }
         match begin_recording(&app, target) {
             Ok(_) => {
@@ -554,6 +669,11 @@ fn start_delayed(app: &AppHandle, target: RecordTarget, delay_secs: u32) {
             }
             Err(e) => {
                 eprintln!("[auracap] recording failed: {e}");
+                // 先に出した枠が画面に残り続けないよう畳む / Take down the frame we put up in advance
+                if framed.is_some() {
+                    hide_rec_frame(&app);
+                    hide_countdown(&app);
+                }
                 let _ = app.emit("recording-error", e);
             }
         }
@@ -722,7 +842,7 @@ pub fn is_recording(app: AppHandle) -> bool {
 /// Export a recording (temp MP4 in history) to the save destination, mirroring still export_save.
 #[tauri::command]
 pub fn save_recording(app: AppHandle, path: String) -> Result<(), String> {
-    let src = PathBuf::from(&path);
+    let src = crate::history::resolve_in_history(&app, &path)?;
     if !src.is_file() {
         return Err("録画ファイルが見つかりません / recording not found".into());
     }
@@ -777,8 +897,8 @@ pub fn save_recording(app: AppHandle, path: String) -> Result<(), String> {
 
 /// 録画（履歴の一時MP4）を破棄（削除）する / Discard (delete) a recording from history
 #[tauri::command]
-pub fn discard_recording(_app: AppHandle, path: String) -> Result<(), String> {
-    let p = PathBuf::from(&path);
+pub fn discard_recording(app: AppHandle, path: String) -> Result<(), String> {
+    let p = crate::history::resolve_in_history(&app, &path)?;
     if p.is_file() {
         std::fs::remove_file(&p).map_err(|e| e.to_string())?;
     }

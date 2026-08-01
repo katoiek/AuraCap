@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-# モバイル用アイコン（AuraCapはWindows専用） / Mobile icons (AuraCap is Windows-only)
+# モバイル用アイコン（AuraCapはデスクトップ専用） / Mobile icons (AuraCap is desktop-only)
 src-tauri/icons/android/
 src-tauri/icons/ios/
 

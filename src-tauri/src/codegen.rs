@@ -39,7 +39,7 @@ pub async fn ollama_list_models(url: String) -> Result<Vec<String>, String> {
                 .collect()
         })
         .unwrap_or_default();
-    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names.sort_by_key(|n| n.to_lowercase());
     Ok(names)
 }
 

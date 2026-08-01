@@ -23,11 +23,6 @@ pub struct Settings {
     pub hotkey_region: String,
     pub hotkey_window: String,
     pub hotkey_fullscreen: String,
-    /// Screenshot-to-Code用のClaude APIキー（ローカル保存・個人用ツールの割り切り）
-    /// Claude API key for Screenshot-to-Code (stored locally; personal-tool tradeoff)
-    pub anthropic_api_key: String,
-    /// コード生成エンジン: "claude" または "ollama" / Codegen engine: "claude" or "ollama"
-    pub codegen_provider: String,
     /// OllamaのエンドポイントURL / Ollama endpoint URL
     pub ollama_url: String,
     /// Ollamaのビジョン対応モデル名 / Ollama vision-capable model name
@@ -72,8 +67,6 @@ impl Default for Settings {
             hotkey_region: DEFAULT_HOTKEY_REGION.into(),
             hotkey_window: DEFAULT_HOTKEY_WINDOW.into(),
             hotkey_fullscreen: DEFAULT_HOTKEY_FULLSCREEN.into(),
-            anthropic_api_key: String::new(),
-            codegen_provider: "claude".into(),
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_model: "qwen2.5vl".into(),
             save_mode: "ask".into(),
@@ -95,13 +88,55 @@ fn settings_path(app: &AppHandle) -> Option<PathBuf> {
         .map(|dir| dir.join("settings.json"))
 }
 
+/// 0.x が平文で保存していたフィールド。1.0でClaude連携を廃止したので、
+/// 設定ファイルに残しておく理由がない（読めば済む場所に鍵が残り続ける）。
+/// Fields 0.x stored in plain text. Claude integration is gone in 1.0, so there is no
+/// reason to keep them on disk — a readable file would otherwise hold a live key forever.
+const LEGACY_FIELDS: [&str; 2] = ["anthropicApiKey", "codegenProvider"];
+
+/// 旧フィールドが残っていれば取り除いて書き戻す。戻り値は「掃除したか」
+/// Strip legacy fields and rewrite the file; returns whether anything was removed
+fn scrub_legacy_fields(path: &std::path::Path, raw: &str) -> bool {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(raw)
+    else {
+        return false;
+    };
+    if !LEGACY_FIELDS.iter().any(|k| map.contains_key(*k)) {
+        return false;
+    }
+    for key in LEGACY_FIELDS {
+        map.remove(key);
+    }
+    match serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .map_err(|e| e.to_string())
+        .and_then(|json| fs::write(path, json).map_err(|e| e.to_string()))
+    {
+        Ok(()) => {
+            eprintln!("[auracap] settings: removed legacy Claude fields");
+            true
+        }
+        // 書き戻せなくても起動は続ける。次回起動で再試行される
+        // Keep booting even if the rewrite fails; the next launch retries
+        Err(e) => {
+            eprintln!("[auracap] settings: failed to remove legacy fields: {e}");
+            false
+        }
+    }
+}
+
 /// 設定ファイルを読む。壊れている・存在しない場合は既定値
 /// Load settings; fall back to defaults if missing or corrupted
 pub fn load(app: &AppHandle) -> Settings {
-    settings_path(app)
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Some(path) = settings_path(app) else {
+        return Settings::default();
+    };
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Settings::default();
+    };
+    scrub_legacy_fields(&path, &raw);
+    // 未知フィールドはserdeが無視するため、掃除の成否に関わらず生JSONから読める
+    // serde ignores unknown fields, so the raw JSON parses regardless of the scrub's outcome
+    serde_json::from_str(&raw).unwrap_or_default()
 }
 
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {

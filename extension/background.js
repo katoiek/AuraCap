@@ -65,7 +65,11 @@ chrome.action.onClicked.addListener(async (tab) => {
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
     const res = await fetch(BRIDGE_URL, {
       method: "POST",
-      headers: { "Content-Type": "image/png" },
+      // X-AuraCap-Bridge はブリッジ側の必須ヘッダ。Webページはプリフライトを通せないため
+      // 付けられず、これがCSRF（閲覧中のサイトからの画像注入）の防波堤になる。
+      // X-AuraCap-Bridge is required by the bridge. Web pages can't set it (their preflight
+      // fails), which is what blocks CSRF image injection from sites the user is browsing.
+      headers: { "Content-Type": "image/png", "X-AuraCap-Bridge": "1" },
       body: bytes,
     });
     if (!res.ok) throw new Error(`bridge responded ${res.status}`);

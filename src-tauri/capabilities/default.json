@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and capture overlays",
-  "windows": ["main", "overlay-*", "editor", "pin-*", "video-editor"],
+  "description": "Capability for the main window and capture overlays. IMPORTANT: a window that calls any Tauri API (invoke / event listen) must be listed in `windows` below, otherwise every call is silently denied. Windows that only paint (recframe-*) are deliberately left out to keep least privilege.",
+  "windows": ["main", "overlay-*", "editor", "pin-*", "video-editor", "reccountdown"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

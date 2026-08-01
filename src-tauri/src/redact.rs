@@ -93,7 +93,7 @@ fn detect(bmp: &[u8]) -> Result<Vec<RedactRegion>, String> {
         .to_rgba8();
 
     let engine = create_engine()?;
-    let max_dim = OcrEngine::MaxImageDimension().map_err(|e| e.to_string())? as u32;
+    let max_dim = OcrEngine::MaxImageDimension().map_err(|e| e.to_string())?;
     if image.width() > max_dim {
         return Err(format!("画像の幅がOCRの上限({max_dim}px)を超えています"));
     }
@@ -179,7 +179,7 @@ fn extract(bmp: &[u8], rect: Option<OcrRect>) -> Result<String, String> {
     }
 
     let engine = create_engine()?;
-    let max_dim = OcrEngine::MaxImageDimension().map_err(|e| e.to_string())? as u32;
+    let max_dim = OcrEngine::MaxImageDimension().map_err(|e| e.to_string())?;
     if image.width() > max_dim {
         return Err(format!("画像の幅がOCRの上限({max_dim}px)を超えています"));
     }

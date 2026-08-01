@@ -2,156 +2,31 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import ResultModal from "./editor/ResultModal";
+import Toolbar from "./editor/Toolbar";
+import { rasterize } from "./editor/raster";
+import {
+  arrowHead,
+  badgeTextColor,
+  COLORS,
+  computeMetrics,
+  measureTextLines,
+  nextId,
+  normRect,
+  textBubbleMetrics,
+  TEXT_FONT,
+  type Gesture,
+  type Obj,
+  type RectShape,
+  type Tool,
+} from "./editor/model";
 
-// 軽量エディタ：出力までは全アノテーションを再編集可能なオブジェクトとして保持する
-// Quick editor: every annotation stays a re-editable object until export
-
-type Tool = "select" | "rect" | "arrow" | "highlight" | "blur" | "text" | "badge" | "crop";
-
-// 座標はすべて画像ピクセル空間 / All coordinates live in image-pixel space
-type RectShape = { x: number; y: number; w: number; h: number };
-type Obj =
-  | ({ id: string; kind: "rect"; color: string } & RectShape)
-  | ({ id: string; kind: "highlight"; color: string; opacity: number } & RectShape)
-  | ({ id: string; kind: "blur" } & RectShape)
-  | { id: string; kind: "arrow"; x1: number; y1: number; x2: number; y2: number; color: string }
-  // color = 背景色（角丸の吹き出し）、textColor = 文字色（白/黒）
-  // color = background (rounded pill), textColor = font color (white/black)
-  | { id: string; kind: "text"; x: number; y: number; text: string; color: string; textColor: string }
-  | { id: string; kind: "badge"; x: number; y: number; n: number; color: string };
-
-type Gesture =
-  | { kind: "draw"; tool: Tool; ax: number; ay: number; id: string }
-  | { kind: "move"; id: string; ox: number; oy: number }
-  | { kind: "resize"; id: string; handle: string; start: Obj }
-  | { kind: "crop-draw"; ax: number; ay: number }
-  | { kind: "crop-resize"; handle: string; start: RectShape }
-  | { kind: "crop-move"; ox: number; oy: number };
-
-const COLORS = ["#fbbf24", "#ef4444", "#3b82f6", "#22c55e", "#18181b", "#ffffff"];
-
-// バッジの数字色：白バッジでは黒、それ以外は白 / Badge digit color: black on white badges, white otherwise
-const badgeTextColor = (bg: string) => (bg.toLowerCase() === "#ffffff" ? "#18181b" : "#ffffff");
-
-const TEXT_FONT = '"Yu Gothic UI", "Segoe UI", sans-serif';
-// テキスト吹き出しの余白・角丸半径（フォントサイズに比例） / Text-bubble padding & corner radius (proportional to font size)
-const textBubbleMetrics = (fontSize: number) => ({
-  padding: fontSize * 0.35,
-  radius: fontSize * 0.3,
-});
-
-// 複数行テキストの描画サイズを計測する（SVGプレビューとPNG書き出しで同じ余白計算に使う）。
-// フォントごとにascent/descentの実測値が異なる（"Yu Gothic UI"/"Segoe UI"はmacOSに存在せず
-// フォールバックフォントになる等）ため、固定倍率ではなくmeasureTextの実測値を使う。
-// 使い捨てのオフスクリーンcanvasを使い回す。
-// Measure multi-line text (shared by the SVG preview and PNG export for identical padding math).
-// Ascent/descent vary by the font actually rendered (e.g. "Yu Gothic UI"/"Segoe UI" don't exist
-// on macOS and fall back to something else), so use measureText's real metrics instead of a
-// fixed multiplier. Reuses a throwaway offscreen canvas for measureText.
-let measureCtx: CanvasRenderingContext2D | null = null;
-function measureTextLines(
-  lines: string[],
-  fontSize: number,
-): { width: number; height: number; ascent: number; lineHeight: number } {
-  const fallbackAscent = fontSize * 0.8;
-  const fallbackDescent = fontSize * 0.25;
-  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
-  const ctx = measureCtx;
-  if (!ctx) {
-    const lineHeight = (fallbackAscent + fallbackDescent) * 1.15;
-    return { width: fontSize, height: lines.length * lineHeight, ascent: fallbackAscent, lineHeight };
-  }
-  ctx.font = `bold ${fontSize}px ${TEXT_FONT}`;
-  const width = Math.max(...lines.map((l) => ctx.measureText(l || " ").width), 1);
-  // 行の内容（降下文字の有無等）で行送りがばらつかないよう、固定の参照文字列で測る
-  // Measure a fixed reference string so line spacing doesn't jitter based on descenders etc.
-  const ref = ctx.measureText("Mjpqy国あ");
-  const ascent = ref.actualBoundingBoxAscent || fallbackAscent;
-  const descent = ref.actualBoundingBoxDescent || fallbackDescent;
-  const lineHeight = (ascent + descent) * 1.15;
-  // 行間の余白（1.15倍分）は行と行の間だけに使う。1行分の天地にまで掛けると、
-  // 単一行のときに下側だけ余白が余って見た目のバランスが崩れるため
-  // The 1.15 leading only applies *between* lines. Multiplying the whole block by it
-  // (including the outermost line) left extra slack stacked at the bottom for single-line text
-  const height = ascent + descent + (lines.length - 1) * lineHeight;
-  return { width, height, ascent, lineHeight };
-}
-
-const TOOLS: { tool: Tool; label: string }[] = [
-  { tool: "select", label: "選択 / 移動" },
-  { tool: "rect", label: "矩形枠" },
-  { tool: "arrow", label: "矢印" },
-  { tool: "text", label: "テキスト" },
-  { tool: "highlight", label: "ハイライト" },
-  { tool: "blur", label: "ぼかし" },
-  { tool: "badge", label: "番号バッジ" },
-  { tool: "crop", label: "トリミング" },
-];
-
-// ツールバー用のSVGアイコン（reicon風のクリーンなライン。currentColorで選択状態に追従）
-// Toolbar SVG icons (clean reicon-style linework; currentColor follows active/inactive state)
-function ToolIcon({ tool }: { tool: Tool }) {
-  const p = {
-    width: 20,
-    height: 20,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 2,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    "aria-hidden": true,
-  };
-  switch (tool) {
-    case "select": // マウスカーソル（矢印ツールと明確に区別）/ Mouse cursor, clearly distinct from the arrow tool
-      return (
-        <svg {...p}>
-          <path d="M4 3l7 16 2.3-6.7L20 10z" fill="currentColor" />
-          <path d="M13 13l5 6" />
-        </svg>
-      );
-    case "rect": // 矩形枠 / Rectangle frame
-      return (
-        <svg {...p}>
-          <rect x="4" y="5" width="16" height="14" rx="2" />
-        </svg>
-      );
-    case "arrow": // 直線＋塗りの矢じり（実際に描画される矢印と揃える）/ Line + filled arrowhead matching the drawn arrow
-      return (
-        <svg {...p}>
-          <line x1="4" y1="20" x2="15" y2="9" />
-          <path d="M20 4l-3 8-5-3z" fill="currentColor" />
-        </svg>
-      );
-    case "text": // テキスト（以前の文字グリフに戻す）/ Text (restored to the original glyph)
-      return <span className="text-base leading-none">T</span>;
-    case "highlight": // ハイライト（以前の文字グリフに戻す）/ Highlight (restored to the original glyph)
-      return <span className="text-base leading-none">▆</span>;
-    case "blur": // ぼかし（以前の文字グリフに戻す）/ Blur (restored to the original glyph)
-      return <span className="text-base leading-none">▒</span>;
-    case "badge": // 番号バッジ（丸に1）/ Numbered badge (circle with "1")
-      return (
-        <svg {...p}>
-          <circle cx="12" cy="12" r="8.5" />
-          <path d="M11 9.5l1.6-1v7" strokeWidth="1.8" />
-        </svg>
-      );
-    case "crop": // トリミング / Crop
-      return (
-        <svg {...p}>
-          <path d="M6 2v14a2 2 0 0 0 2 2h14" />
-          <path d="M18 22V8a2 2 0 0 0-2-2H2" />
-        </svg>
-      );
-  }
-}
-
-let idCounter = 0;
-const nextId = () => `obj-${++idCounter}-${Date.now()}`;
-
-function normRect(ax: number, ay: number, bx: number, by: number): RectShape {
-  return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
-}
+// 軽量エディタ：出力までは全アノテーションを再編集可能なオブジェクトとして保持する。
+// このファイルは状態とポインタ操作、そしてステージ（画像＋SVG）の描画を担当する。
+// 型・定数はeditor/model、書き出しはeditor/raster、ツールバーはeditor/Toolbarへ分離している。
+// Quick editor: every annotation stays a re-editable object until export. This file owns the
+// state, the pointer interactions, and the stage (image + SVG overlay). Types and constants live
+// in editor/model, the export path in editor/raster, and the toolbar in editor/Toolbar.
 
 function Editor() {
   const [version, setVersion] = useState(0);
@@ -182,7 +57,6 @@ function Editor() {
   // 結果モーダル（コード生成・テキスト抽出で共用） / Result modal (shared by codegen & text extraction)
   const [resultModal, setResultModal] = useState<{ title: string; text: string } | null>(null);
   const [extracting, setExtracting] = useState(false);
-  const modalTextRef = useRef<HTMLTextAreaElement | null>(null);
   // 生成経過秒数（ローカルLLMは数分かかるため進行が見えるように）
   // Elapsed seconds; local LLMs can take minutes, so show progress
   const [genElapsed, setGenElapsed] = useState(0);
@@ -205,11 +79,8 @@ function Editor() {
   cropRef.current = crop;
 
   // アノテーションの基準サイズ（画像サイズに比例） / Annotation base sizes proportional to the image
-  const baseStroke = imgSize ? Math.max(3, Math.round(imgSize.w / 450)) : 3;
-  const stroke = Math.max(1, Math.round(baseStroke * strokeMul));
-  const fontSize = imgSize ? Math.max(18, Math.round(imgSize.w / 42)) : 18;
-  const badgeR = Math.round(fontSize * 0.57);
-  const blurPx = imgSize ? Math.max(10, Math.round(imgSize.w / 130)) : 10;
+  const metrics = computeMetrics(imgSize?.w ?? null, strokeMul);
+  const { stroke, fontSize, badgeR, blurPx } = metrics;
 
   const resetAll = useCallback(() => {
     setObjects([]);
@@ -290,12 +161,12 @@ function Editor() {
       if (needed <= window.innerWidth + 1) return; // 既に十分広い / already wide enough
       try {
         const win = getCurrentWebviewWindow();
-        const scale = await win.scaleFactor();
+        const winScale = await win.scaleFactor();
         const outer = await win.outerSize();
-        const chromeW = outer.width / scale - window.innerWidth;
+        const chromeW = outer.width / winScale - window.innerWidth;
         const maxInner = window.screen.availWidth * 0.96 - chromeW;
         const targetInner = Math.min(needed, maxInner);
-        const outerH = outer.height / scale; // 高さは維持 / keep height
+        const outerH = outer.height / winScale; // 高さは維持 / keep height
         await win.setSize(new LogicalSize(Math.ceil(targetInner + chromeW), Math.ceil(outerH)));
       } catch {
         /* ウィンドウ操作不可時は無視 / Ignore when the window op is unavailable */
@@ -366,100 +237,16 @@ function Editor() {
 
   // ---- 書き出し / Export ----
 
-  const renderToPng = useCallback(async (
-    format: "png" | "jpg" | "webp" = "png",
-  ): Promise<Uint8Array | null> => {
-    const img = imgRef.current;
-    if (!img || !imgSize) return null;
-    const canvas = document.createElement("canvas");
-    canvas.width = imgSize.w;
-    canvas.height = imgSize.h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(img, 0, 0);
-
-    for (const o of objects) {
-      if (o.kind === "blur") {
-        // ぼかし：該当領域だけフィルタをかけて再描画 / Blur: redraw just the region with a filter
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(o.x, o.y, o.w, o.h);
-        ctx.clip();
-        ctx.filter = `blur(${blurPx}px)`;
-        ctx.drawImage(img, 0, 0);
-        ctx.restore();
-      } else if (o.kind === "rect") {
-        ctx.strokeStyle = o.color;
-        ctx.lineWidth = stroke;
-        ctx.strokeRect(o.x, o.y, o.w, o.h);
-      } else if (o.kind === "highlight") {
-        // 通常合成：不透明度100%で完全な塗りつぶしになるようにする（multiplyだと下地が透けて残る）
-        // Normal blending so 100% opacity is a fully solid fill (multiply would still let the base show through)
-        ctx.save();
-        ctx.fillStyle = o.color;
-        ctx.globalAlpha = o.opacity;
-        ctx.fillRect(o.x, o.y, o.w, o.h);
-        ctx.restore();
-      } else if (o.kind === "arrow") {
-        drawArrow(ctx, o.x1, o.y1, o.x2, o.y2, o.color, stroke);
-      } else if (o.kind === "text") {
-        const lines = o.text.split("\n");
-        const { width, height, ascent, lineHeight } = measureTextLines(lines, fontSize);
-        const { padding, radius } = textBubbleMetrics(fontSize);
-        ctx.save();
-        ctx.fillStyle = o.color;
-        ctx.beginPath();
-        ctx.roundRect(o.x - padding, o.y - padding, width + padding * 2, height + padding * 2, radius);
-        ctx.fill();
-        ctx.font = `bold ${fontSize}px ${TEXT_FONT}`;
-        ctx.textBaseline = "alphabetic";
-        ctx.fillStyle = o.textColor;
-        lines.forEach((line, i) => {
-          ctx.fillText(line, o.x, o.y + ascent + i * lineHeight);
-        });
-        ctx.restore();
-      } else if (o.kind === "badge") {
-        ctx.save();
-        ctx.fillStyle = o.color;
-        ctx.beginPath();
-        ctx.arc(o.x, o.y, badgeR, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = badgeTextColor(o.color);
-        ctx.font = `bold ${Math.round(badgeR * 1.1)}px "Segoe UI", sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(String(o.n), o.x, o.y + badgeR * 0.05);
-        ctx.restore();
-      }
-    }
-
-    // トリミング適用 / Apply crop
-    let out = canvas;
-    if (crop && crop.w > 2 && crop.h > 2) {
-      const c2 = document.createElement("canvas");
-      c2.width = Math.round(crop.w);
-      c2.height = Math.round(crop.h);
-      c2.getContext("2d")!.drawImage(canvas, -Math.round(crop.x), -Math.round(crop.y));
-      out = c2;
-    }
-
-    // JPEGは透過を持てないため白背景で平坦化 / JPEG has no alpha, so flatten onto white
-    if (format === "jpg") {
-      const flat = document.createElement("canvas");
-      flat.width = out.width;
-      flat.height = out.height;
-      const fctx = flat.getContext("2d")!;
-      fctx.fillStyle = "#ffffff";
-      fctx.fillRect(0, 0, flat.width, flat.height);
-      fctx.drawImage(out, 0, 0);
-      out = flat;
-    }
-    const mime = format === "jpg" ? "image/jpeg" : format === "webp" ? "image/webp" : "image/png";
-    const quality = format === "png" ? undefined : 0.92;
-    const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, mime, quality));
-    if (!blob) return null;
-    return new Uint8Array(await blob.arrayBuffer());
-  }, [objects, crop, imgSize, stroke, fontSize, badgeR, blurPx]);
+  const renderToPng = useCallback(
+    async (format: "png" | "jpg" | "webp" = "png"): Promise<Uint8Array | null> => {
+      const img = imgRef.current;
+      if (!img || !imgSize) return null;
+      return rasterize({ img, size: imgSize, objects, crop, metrics, format });
+    },
+    // metricsは毎レンダー新しいオブジェクトになるため、依存には中身の値を並べる
+    // metrics is a fresh object each render, so depend on its values rather than the object
+    [objects, crop, imgSize, stroke, fontSize, badgeR, blurPx], // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const showToast = useCallback((message: string, ms = 1800) => {
     setToast(message);
@@ -471,52 +258,51 @@ function Editor() {
     if (!png) return;
     try {
       await invoke("export_copy", png);
-      showToast("クリップボードへコピーしました");
+      showToast("コピーしました");
     } catch (e) {
+      showToast(`コピーに失敗しました: ${e}`);
       invoke("frontend_log", { message: `export_copy failed: ${e}` });
     }
   }, [renderToPng, showToast]);
 
   const doSave = useCallback(async () => {
-    // 設定の出力形式に合わせてエンコード（拡張子はバックエンドが同じ設定で付与）
-    // Encode to the configured format (the backend names the file with the same setting)
+    // 保存形式は設定に従う（フロントのエンコードとバックエンドの拡張子を一致させる）
+    // The save format follows settings so the encoding here matches the backend's extension
     let format: "png" | "jpg" | "webp" = "png";
     try {
-      const s = await invoke<{ saveFormat?: string }>("get_settings");
+      const s = await invoke<{ saveFormat: string }>("get_settings");
       const f = (s.saveFormat || "png").toLowerCase();
       format = f === "jpg" || f === "jpeg" ? "jpg" : f === "webp" ? "webp" : "png";
     } catch {
-      /* 既定のpngで続行 / fall back to png */
+      /* 設定が読めなければPNG / Fall back to PNG when settings are unreadable */
     }
     const bytes = await renderToPng(format);
     if (!bytes) return;
     try {
       await invoke("export_save", bytes);
     } catch (e) {
+      showToast(`保存に失敗しました: ${e}`);
       invoke("frontend_log", { message: `export_save failed: ${e}` });
     }
-  }, [renderToPng]);
+  }, [renderToPng, showToast]);
 
-  // 付箋ピン留め：編集後の画像を最前面のフローティング窓としてデスクトップに貼る
-  // Pin the edited image to the desktop as an always-on-top floating window
   const doPin = useCallback(async () => {
     const png = await renderToPng();
     if (!png) return;
     try {
       await invoke("pin_image", png);
-      showToast("デスクトップにピン留めしました");
+      showToast("デスクトップに貼り付けました");
     } catch (e) {
-      showToast(`ピン留めに失敗しました: ${String(e).slice(0, 120)}`);
-      invoke("frontend_log", { message: `pin failed: ${e}` });
+      showToast(`ピン留めに失敗しました: ${e}`);
+      invoke("frontend_log", { message: `pin_image failed: ${e}` });
     }
   }, [renderToPng, showToast]);
 
-  // Smart Redact: ローカルOCRで機密情報らしき領域を検出し、ぼかしとして追加する
-  // Smart Redact: detect sensitive-looking regions with local OCR, add them as blurs
+  // Smart Redact: ローカルOCRで機密領域を検出し、ぼかしオブジェクトとして追加する
+  // Smart Redact: detect sensitive regions with local OCR and add them as blur objects
   const runRedact = useCallback(async () => {
     if (redacting) return;
     setRedacting(true);
-    setToast("機密情報を検出中…");
     try {
       const regions = await invoke<{ x: number; y: number; w: number; h: number; kind: string }[]>(
         "detect_sensitive",
@@ -539,42 +325,30 @@ function Editor() {
     }
   }, [redacting, pushUndo, showToast]);
 
-  // Screenshot-to-Code: 編集後の画像から単一HTMLを生成する（Claude API / ローカルOllama）
-  // Screenshot-to-Code: generate a single-file HTML from the edited image (Claude API / local Ollama)
+  // Screenshot-to-Code: 編集後の画像から単一HTMLを生成する（ローカルOllamaのみ）
+  // キャプチャ画像は機密を含みうるため、外部APIへは一切送らない方針。
+  // Screenshot-to-Code: generate a single-file HTML from the edited image (local Ollama only).
+  // Captures can contain sensitive material, so nothing is ever sent to an external API.
   const runCodegen = useCallback(async () => {
     if (generating) return;
     try {
-      const settings = await invoke<{
-        anthropicApiKey: string;
-        codegenProvider: string;
-        ollamaUrl: string;
-        ollamaModel: string;
-      }>("get_settings");
-      const provider = settings.codegenProvider === "ollama" ? "ollama" : "claude";
-      const apiKey = settings.anthropicApiKey?.trim();
+      const settings = await invoke<{ ollamaUrl: string; ollamaModel: string }>("get_settings");
       const ollamaModel = settings.ollamaModel?.trim();
-      if (provider === "claude" && !apiKey) {
-        showToast("メイン画面でClaude APIキーを設定してください");
-        return;
-      }
-      if (provider === "ollama" && !ollamaModel) {
+      if (!ollamaModel) {
         showToast("メイン画面でOllamaのモデル名を設定してください");
         return;
       }
       const png = await renderToPng();
       if (!png) return;
       setGenerating(true);
-      invoke("frontend_log", {
-        message: `codegen start: provider=${provider} model=${provider === "ollama" ? ollamaModel : "claude-fable-5"}`,
-      });
-      // ハング対策の上限時間 / Hard cap against hangs
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 600_000);
+      invoke("frontend_log", { message: `codegen start: model=${ollamaModel}` });
 
-      // 画像上限（Claudeは8000px）に収まるよう縮小し、サイズ削減のためJPEG化
-      // Downscale within the image limit (8000px for Claude); JPEG keeps the payload small
+      // 送信サイズを抑えるため縮小＋JPEG化する / Downscale and JPEG-encode to keep the payload small
       const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: "image/png" }));
-      const k = Math.min(1, 7800 / Math.max(bitmap.width, bitmap.height));
+      // 長辺の上限。これ以上大きくてもモデルの認識精度は上がらず、転送と推論だけ重くなる
+      // Long-edge cap: beyond this the model gains no accuracy, only transfer and inference cost
+      const MAX_EDGE = 2048;
+      const k = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, Math.round(bitmap.width * k));
       canvas.height = Math.max(1, Math.round(bitmap.height * k));
@@ -588,65 +362,21 @@ function Editor() {
         "レイアウト・配色・余白・フォントサイズをできるだけ正確に。写真やイラスト部分はプレースホルダーで構いません。" +
         "完全なHTMLコードのみを出力してください（説明文・コードフェンスは不要）。";
 
-      let code: string;
-      if (provider === "ollama") {
-        // OllamaネイティブAPI。Rust経由で呼ぶ（WebViewのfetchはCORSで弾かれる。完全ローカル・無料、要: ビジョン対応モデル）
-        // Ollama's native API via Rust (WebView fetch is blocked by CORS); fully local & free, needs a vision-capable model
-        code = await invoke<string>("ollama_generate", {
-          url: settings.ollamaUrl?.trim() || "http://127.0.0.1:11434",
-          model: ollamaModel,
-          prompt,
-          imageBase64: base64,
-        });
-      } else {
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          signal: controller.signal,
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            // WebViewから直接呼ぶための明示オプトイン / Explicit opt-in for direct browser calls
-            "anthropic-dangerous-direct-browser-access": "true",
-          },
-          body: JSON.stringify({
-            model: "claude-fable-5",
-            max_tokens: 16000,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "image",
-                    source: { type: "base64", media_type: "image/jpeg", data: base64 },
-                  },
-                  { type: "text", text: prompt },
-                ],
-              },
-            ],
-          }),
-        });
-        if (!res.ok) {
-          const body = await res.text();
-          throw new Error(`API ${res.status}: ${body.slice(0, 200)}`);
-        }
-        const data = await res.json();
-        code = (data.content ?? [])
-          .filter((b: { type: string }) => b.type === "text")
-          .map((b: { text: string }) => b.text)
-          .join("\n");
-      }
+      // OllamaネイティブAPI。Rust経由で呼ぶ（WebViewのfetchはCORSで弾かれる。完全ローカル・無料、要: ビジョン対応モデル）
+      // Ollama's native API via Rust (WebView fetch is blocked by CORS); fully local & free, needs a vision-capable model
+      let code = await invoke<string>("ollama_generate", {
+        url: settings.ollamaUrl?.trim() || "http://127.0.0.1:11434",
+        model: ollamaModel,
+        prompt,
+        imageBase64: base64,
+      });
 
-      clearTimeout(timeoutId);
       // コードフェンス付きで返ってきた場合は剥がす / Strip code fences if present
       code = code.replace(/^```[a-z]*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
       setResultModal({ title: "生成されたHTML（Tailwind CSS）", text: code || "（出力が空でした）" });
     } catch (e) {
-      const message =
-        e instanceof DOMException && e.name === "AbortError"
-          ? "コード生成がタイムアウトしました（10分）。モデルやマシン負荷を確認してください"
-          : `コード生成に失敗しました: ${String(e).slice(0, 160)}`;
-      showToast(message, 6000);
+      // タイムアウト（Rust側で10分）もここに来る / Timeouts (10 min, enforced in Rust) land here too
+      showToast(`コード生成に失敗しました: ${String(e).slice(0, 160)}`, 6000);
       invoke("frontend_log", { message: `codegen failed: ${e}` });
     } finally {
       setGenerating(false);
@@ -982,214 +712,45 @@ function Editor() {
     }
   };
 
-  // 線幅プリセット / Line-width presets
-  const STROKE_PRESETS: { label: string; mul: number; title: string }[] = [
-    { label: "細", mul: 0.6, title: "線を細く" },
-    { label: "中", mul: 1, title: "標準の線幅" },
-    { label: "太", mul: 1.7, title: "線を太く" },
-  ];
-
   return (
     <div className="flex h-screen w-screen flex-col bg-zinc-900 text-zinc-100">
-      {/* ツールバー / Toolbar */}
-      <header
-        ref={toolbarRef}
-        className="flex items-center gap-1 overflow-x-auto border-b border-zinc-800 px-2 py-1.5 [&>*]:shrink-0"
-      >
-        {TOOLS.map((t) => (
-          <button
-            key={t.tool}
-            title={t.label}
-            onClick={() => {
-              setTool(t.tool);
-              setSelected(null);
-            }}
-            className={`grid h-9 w-9 place-items-center rounded-lg transition-colors ${
-              tool === t.tool ? "bg-[var(--accent)] text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-            }`}
-          >
-            <ToolIcon tool={t.tool} />
-          </button>
-        ))}
-        {crop && (
-          <button
-            onClick={() => {
-              pushUndo();
-              setCrop(null);
-            }}
-            className="ml-1 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
-          >
-            トリミング解除
-          </button>
-        )}
-        <div className="mx-2 h-6 w-px bg-zinc-700" />
-        {/* 線幅プリセット / Line-width presets */}
-        {STROKE_PRESETS.map((p) => (
-          <button
-            key={p.label}
-            title={p.title}
-            onClick={() => setStrokeMul(p.mul)}
-            className={`grid h-9 w-9 place-items-center rounded-lg text-xs transition-colors ${
-              strokeMul === p.mul ? "bg-[var(--accent)] text-zinc-900" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-        <div className="mx-2 h-6 w-px bg-zinc-700" />
-        {COLORS.map((c) => (
-          <button
-            key={c}
-            onClick={() => chooseColor(c)}
-            className={`h-6 w-6 rounded-full border-2 ${color === c ? "border-white" : "border-zinc-600"}`}
-            style={{ backgroundColor: c }}
-          />
-        ))}
-        {/* 自由色（カラーピッカー） / Custom color picker */}
-        <label
-          title="自由な色を選ぶ"
-          className={`relative grid h-6 w-6 cursor-pointer place-items-center overflow-hidden rounded-full border-2 ${
-            COLORS.includes(color) ? "border-zinc-600" : "border-white"
-          }`}
-          style={{ backgroundColor: COLORS.includes(color) ? "transparent" : color }}
-        >
-          {COLORS.includes(color) && <span className="text-[11px] leading-none">🎨</span>}
-          <input
-            type="color"
-            value={color}
-            onChange={(e) => chooseColor(e.target.value)}
-            className="absolute inset-0 cursor-pointer opacity-0"
-          />
-        </label>
-        {/* スポイト / Eyedropper */}
-        <button
-          onClick={pickWithEyeDropper}
-          title="画面から色を吸い取る（スポイト）"
-          className="grid h-9 w-9 place-items-center rounded-lg bg-zinc-800 text-base text-zinc-300 hover:bg-zinc-700"
-        >
-          🧪
-        </button>
-        {/* ハイライトの不透明度（ハイライトツール選択中、またはハイライトを選択中のみ表示） */}
-        {/* Highlight opacity (shown only while the highlight tool or a highlight object is active) */}
-        {(tool === "highlight" || selectedObj?.kind === "highlight") && (
-          <label className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300" title="ハイライトの不透明度">
-            <span>不透明度</span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={Math.round((selectedObj?.kind === "highlight" ? selectedObj.opacity : highlightOpacity) * 100)}
-              onChange={(e) => chooseHighlightOpacity(Number(e.target.value) / 100)}
-              className="w-20 accent-[var(--accent)]"
-            />
-            <span className="w-8 text-right font-mono">
-              {Math.round((selectedObj?.kind === "highlight" ? selectedObj.opacity : highlightOpacity) * 100)}%
-            </span>
-          </label>
-        )}
-        {/* テキストの文字色（白/黒）。カラースウォッチは背景色として使う */}
-        {/* Text font color (white/black); the color swatches act as the background */}
-        {(tool === "text" || selectedObj?.kind === "text") && (
-          <div className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300">
-            <span>文字色</span>
-            {["#ffffff", "#000000"].map((c) => (
-              <button
-                key={c}
-                title={c === "#ffffff" ? "白文字" : "黒文字"}
-                onClick={() => chooseTextColor(c)}
-                className={`h-6 w-6 rounded-full border-2 ${
-                  (selectedObj?.kind === "text" ? selectedObj.textColor : textColor) === c
-                    ? "border-[var(--accent)]"
-                    : "border-zinc-600"
-                }`}
-                style={{ backgroundColor: c }}
-              />
-            ))}
-          </div>
-        )}
-        <div className="mx-2 h-6 w-px bg-zinc-700" />
-        {/* Smart Redact（ローカルOCR） / Smart Redact (local OCR) */}
-        <button
-          onClick={runRedact}
-          disabled={redacting}
-          title="メール・電話番号・APIキー等を検出してぼかします（ローカル処理、外部送信なし）"
-          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-        >
-          {redacting ? "検出中…" : "🛡 自動マスク"}
-        </button>
-        {/* テキスト抽出（ローカルOCR） / Text extraction (local OCR) */}
-        <button
-          onClick={runExtractText}
-          disabled={extracting}
-          title="画像内の文字をOCRで読み取ってコピーできます（ローカル処理、外部送信なし）"
-          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-        >
-          {extracting ? "抽出中…" : "📋 テキスト抽出"}
-        </button>
-        {/* Screenshot-to-Code（Claude API） */}
-        <button
-          onClick={runCodegen}
-          disabled={generating}
-          title="このスクリーンショットからTailwind CSSのHTMLを生成します（Claude API使用）"
-          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-        >
-          {generating ? `生成中… ${genElapsed}s` : "⧉ コード生成"}
-        </button>
-        <div className="mx-2 h-6 w-px bg-zinc-700" />
-        {/* 表示ズーム / Display zoom */}
-        <button
-          onClick={() => stepZoom(-1)}
-          title="ズームアウト (Ctrl+-)"
-          className="grid h-8 w-8 place-items-center rounded-lg bg-zinc-800 text-base text-zinc-300 hover:bg-zinc-700"
-        >
-          −
-        </button>
-        <button
-          onClick={() => setZoom(null)}
-          title="ウィンドウに合わせる (Ctrl+0)"
-          className={`min-w-14 rounded-lg px-2 py-1.5 text-center font-mono text-xs hover:bg-zinc-700 ${
-            zoom === null ? "bg-zinc-800 text-zinc-400" : "bg-zinc-700 text-[var(--accent)]"
-          }`}
-        >
-          {Math.round(scale * 100)}%
-        </button>
-        <button
-          onClick={() => stepZoom(1)}
-          title="ズームイン (Ctrl++ / Ctrl+ホイール)"
-          className="grid h-8 w-8 place-items-center rounded-lg bg-zinc-800 text-base text-zinc-300 hover:bg-zinc-700"
-        >
-          ＋
-        </button>
-        <div className="ml-auto flex items-center gap-1.5">
-          <button
-            onClick={doPin}
-            className="rounded-lg bg-zinc-800 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-700"
-            title="デスクトップに常に最前面で貼り付け"
-          >
-            📌 ピン
-          </button>
-          <button
-            onClick={doCopy}
-            className="rounded-lg bg-[var(--accent)] px-3.5 py-1.5 text-sm font-semibold text-zinc-900 hover:bg-[var(--accent-strong)]"
-            title="Ctrl+C"
-          >
-            コピー
-          </button>
-          <button
-            onClick={doSave}
-            className="rounded-lg bg-zinc-800 px-3.5 py-1.5 text-sm text-zinc-200 hover:bg-zinc-700"
-            title="Ctrl+S"
-          >
-            保存
-          </button>
-          <button
-            onClick={() => invoke("close_editor")}
-            className="rounded-lg bg-zinc-800 px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-700"
-          >
-            閉じる
-          </button>
-        </div>
-      </header>
+      <Toolbar
+        toolbarRef={toolbarRef}
+        tool={tool}
+        onSelectTool={(t) => {
+          setTool(t);
+          setSelected(null);
+        }}
+        hasCrop={crop !== null}
+        onClearCrop={() => {
+          pushUndo();
+          setCrop(null);
+        }}
+        strokeMul={strokeMul}
+        onStrokeMul={setStrokeMul}
+        color={color}
+        onColor={chooseColor}
+        onEyeDropper={pickWithEyeDropper}
+        selectedObj={selectedObj}
+        highlightOpacity={highlightOpacity}
+        onHighlightOpacity={chooseHighlightOpacity}
+        textColor={textColor}
+        onTextColor={chooseTextColor}
+        redacting={redacting}
+        onRedact={runRedact}
+        extracting={extracting}
+        onExtractText={runExtractText}
+        generating={generating}
+        genElapsed={genElapsed}
+        onCodegen={runCodegen}
+        scale={scale}
+        zoom={zoom}
+        onZoomStep={stepZoom}
+        onZoomFit={() => setZoom(null)}
+        onPin={doPin}
+        onCopy={doCopy}
+        onSave={doSave}
+      />
 
       {/* ステージ / Stage */}
       {/* ズーム時にスクロールできるようoverflow-auto、小さい画像はm-autoで中央寄せ */}
@@ -1429,87 +990,19 @@ function Editor() {
         </div>
       )}
 
-      {/* 結果モーダル（コード生成・テキスト抽出で共用） / Result modal (codegen & text extraction) */}
       {resultModal !== null && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6">
-          <div className="flex h-[80vh] max-h-full w-full max-w-3xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
-              <h2 className="text-sm font-semibold">{resultModal.title}</h2>
-              <div className="flex gap-1.5">
-                <button
-                  onClick={() => {
-                    // 選択範囲があればそれを、なければ全文をコピー
-                    // Copy the selection if any, otherwise the whole text
-                    const ta = modalTextRef.current;
-                    const sel = ta ? ta.value.substring(ta.selectionStart, ta.selectionEnd) : "";
-                    const toCopy = sel || ta?.value || resultModal.text;
-                    navigator.clipboard.writeText(toCopy);
-                    showToast(sel ? "選択範囲をコピーしました" : "コピーしました");
-                  }}
-                  className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-[var(--accent-strong)]"
-                >
-                  コピー
-                </button>
-                <button
-                  onClick={() => setResultModal(null)}
-                  className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
-                >
-                  閉じる
-                </button>
-              </div>
-            </div>
-            {/* 編集・選択できるテキストエリア（部分選択コピー用） / Editable, selectable area for partial-copy */}
-            <textarea
-              ref={modalTextRef}
-              key={`${resultModal.title}:${resultModal.text.length}`}
-              defaultValue={resultModal.text}
-              spellCheck={false}
-              className="min-h-0 flex-1 resize-none overflow-auto bg-transparent p-4 font-mono text-xs leading-relaxed text-zinc-300 focus:outline-none"
-            />
-          </div>
-        </div>
+        <ResultModal
+          // 内容が変わったらtextareaを作り直す（defaultValueは初回しか反映されないため）
+          // Remount the textarea when the content changes (defaultValue only applies on mount)
+          key={`${resultModal.title}:${resultModal.text.length}`}
+          title={resultModal.title}
+          text={resultModal.text}
+          onCopied={(partial) => showToast(partial ? "選択範囲をコピーしました" : "コピーしました")}
+          onClose={() => setResultModal(null)}
+        />
       )}
     </div>
   );
-}
-
-// 矢印の先端形状 / Arrowhead geometry
-function arrowHead(x1: number, y1: number, x2: number, y2: number, size: number) {
-  const angle = Math.atan2(y2 - y1, x2 - x1);
-  const baseX = x2 - size * 0.8 * Math.cos(angle);
-  const baseY = y2 - size * 0.8 * Math.sin(angle);
-  const left = `${x2 - size * Math.cos(angle - 0.45)},${y2 - size * Math.sin(angle - 0.45)}`;
-  const right = `${x2 - size * Math.cos(angle + 0.45)},${y2 - size * Math.sin(angle + 0.45)}`;
-  return { baseX, baseY, points: `${x2},${y2} ${left} ${right}` };
-}
-
-function drawArrow(
-  ctx: CanvasRenderingContext2D,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  color: string,
-  stroke: number,
-) {
-  const head = arrowHead(x1, y1, x2, y2, stroke * 4);
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = stroke;
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(head.baseX, head.baseY);
-  ctx.stroke();
-  const angle = Math.atan2(y2 - y1, x2 - x1);
-  const size = stroke * 4;
-  ctx.beginPath();
-  ctx.moveTo(x2, y2);
-  ctx.lineTo(x2 - size * Math.cos(angle - 0.45), y2 - size * Math.sin(angle - 0.45));
-  ctx.lineTo(x2 - size * Math.cos(angle + 0.45), y2 - size * Math.sin(angle + 0.45));
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
 }
 
 export default Editor;

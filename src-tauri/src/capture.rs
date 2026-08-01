@@ -72,6 +72,13 @@ pub struct Frame {
     pub bmp: Vec<u8>,
 }
 
+/// 1モニター分の撮影結果。並列スレッドから戻る生の組で、この後 Frame へ組み立てる。
+/// (モニターID, 物理原点x, 物理原点y, スケール, 撮影画像, 表示用BMP)
+/// One monitor's capture result: the raw tuple returned from the parallel threads,
+/// assembled into a Frame afterwards.
+/// (monitor id, physical origin x, physical origin y, scale, captured image, display BMP)
+type CapturedMonitor = (u32, i32, i32, f32, RgbaImage, Vec<u8>);
+
 /// アクティブなキャプチャセッション（空 = セッションなし）
 /// Active capture session (empty = no session)
 #[derive(Default)]
@@ -144,7 +151,7 @@ fn begin_session(app: &AppHandle, mode: CaptureMode) -> Result<(), AnyError> {
         .iter()
         .filter_map(|m| m.id().ok())
         .collect();
-    let captured: Vec<Result<(u32, i32, i32, f32, RgbaImage, Vec<u8>), String>> =
+    let captured: Vec<Result<CapturedMonitor, String>> =
         std::thread::scope(|scope| {
             let handles: Vec<_> = monitor_ids
                 .into_iter()

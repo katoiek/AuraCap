@@ -1,7 +1,7 @@
 [package]
 name = "auracap"
-version = "0.1.5"
-description = "AI-ready screen capture tool for Windows"
+version = "1.0.0"
+description = "AI-ready screen capture tool for Windows and macOS"
 authors = ["katoiek"]
 edition = "2021"
 

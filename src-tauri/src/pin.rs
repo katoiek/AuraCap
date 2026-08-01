@@ -56,6 +56,7 @@ pub async fn pin_image(app: AppHandle, request: tauri::ipc::Request<'_>) -> Resu
 /// 履歴の画像を付箋として貼る / Pin a history image
 #[tauri::command]
 pub async fn pin_history(app: AppHandle, path: String) -> Result<(), String> {
+    let path = crate::history::resolve_in_history(&app, &path)?;
     let png = std::fs::read(&path).map_err(|e| e.to_string())?;
     spawn_pin(&app, png)
 }

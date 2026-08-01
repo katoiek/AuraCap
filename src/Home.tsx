@@ -14,8 +14,6 @@ type Settings = {
   hotkeyRegion: string;
   hotkeyWindow: string;
   hotkeyFullscreen: string;
-  anthropicApiKey: string;
-  codegenProvider: string; // "claude" | "ollama"
   ollamaUrl: string;
   ollamaModel: string;
   saveMode: string; // "ask" | "fixed" | "last"
@@ -31,8 +29,6 @@ const DEFAULT_SETTINGS: Settings = {
   hotkeyRegion: "PrintScreen",
   hotkeyWindow: "Ctrl+PrintScreen",
   hotkeyFullscreen: "Shift+PrintScreen",
-  anthropicApiKey: "",
-  codegenProvider: "claude",
   ollamaUrl: "http://127.0.0.1:11434",
   ollamaModel: "qwen2.5vl",
   saveMode: "ask",
@@ -343,12 +339,12 @@ function Home() {
     }
   }, []);
 
-  // 設定画面でOllama選択中はモデル一覧を自動取得 / Auto-fetch models while Ollama is selected on the settings view
+  // 設定画面を開いている間はモデル一覧を自動取得 / Auto-fetch the model list while the settings view is open
   useEffect(() => {
-    if (view === "settings" && settings?.codegenProvider === "ollama") {
+    if (view === "settings" && settings?.ollamaUrl) {
       fetchOllamaModels(settings.ollamaUrl);
     }
-  }, [view, settings?.codegenProvider, settings?.ollamaUrl, fetchOllamaModels]);
+  }, [view, settings?.ollamaUrl, fetchOllamaModels]);
 
   // 録取中のキーイベント / Key capture while recording
   useEffect(() => {
@@ -426,8 +422,6 @@ function Home() {
       cancelAnimationFrame(raf);
     };
   }, [view]);
-
-  const provider = settings?.codegenProvider ?? "claude";
 
   // ---- 履歴ブラウザ / History browser ----
   if (view === "history") {
@@ -808,128 +802,89 @@ function Home() {
       <div className="h-px bg-white/10" />
 
       {/* コード生成設定 / Codegen settings */}
+      {/* エンジンはOllama（完全ローカル）のみ。画像を外部APIへ送らない方針のため。
+          Ollama is the only engine: the images never leave the machine. */}
       <section className="flex flex-col gap-2">
         <span className="text-sm font-semibold">コード生成（Screenshot-to-Code）</span>
+        <p className="text-xs text-zinc-500">
+          ローカルのOllamaで処理します。画像がこのPCの外に出ることはありません。
+        </p>
 
         <div className="flex items-center gap-2">
-          <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="codegen-provider">
-            エンジン
-          </label>
-          <select
-            id="codegen-provider"
-            value={provider}
-            onChange={(e) => settings && applySettings({ ...settings, codegenProvider: e.target.value })}
-            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
-          >
-            <option value="claude">Claude API</option>
-            <option value="ollama">Ollama（ローカル）</option>
-          </select>
-        </div>
-
-        {provider === "claude" ? (
-          <div className="flex items-center gap-2">
-            <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="api-key">
-              APIキー
-            </label>
+          <label className="w-16 shrink-0 text-xs text-zinc-400">モデル</label>
+          {ollamaModels && ollamaModels.length > 0 ? (
+            // 一覧取得成功 → ドロップダウン（選択で即保存） / Models loaded → dropdown (saves on change)
+            <select
+              value={settings?.ollamaModel ?? ""}
+              onChange={(e) => settings && applySettings({ ...settings, ollamaModel: e.target.value })}
+              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
+            >
+              {settings?.ollamaModel && !ollamaModels.includes(settings.ollamaModel) && (
+                <option value={settings.ollamaModel}>{settings.ollamaModel}（未インストール？）</option>
+              )}
+              {ollamaModels.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            // 一覧未取得（未起動等）→ 手入力にフォールバック / No list → manual entry
             <input
-              id="api-key"
-              type="password"
-              placeholder="sk-ant-…"
-              value={draft?.anthropicApiKey ?? settings?.anthropicApiKey ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, anthropicApiKey: e.target.value }))}
+              type="text"
+              placeholder={loadingModels ? "モデル一覧を取得中…" : "モデル名（例: qwen2.5vl）"}
+              value={draft?.ollamaModel ?? settings?.ollamaModel ?? ""}
+              onChange={(e) => setDraft((d) => ({ ...d, ollamaModel: e.target.value }))}
+              onBlur={async () => {
+                if (settings && draft?.ollamaModel !== undefined) {
+                  if (await applySettings({ ...settings, ollamaModel: (draft.ollamaModel ?? "").trim() }))
+                    setDraft((d) => ({ ...d, ollamaModel: undefined }));
+                }
+              }}
               className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
             />
-            {draft?.anthropicApiKey !== undefined && (
-              <button
-                onClick={async () => {
-                  if (!settings) return;
-                  if (await applySettings({ ...settings, anthropicApiKey: (draft.anthropicApiKey ?? "").trim() }))
-                    setDraft(null);
-                }}
-                className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-[var(--accent-strong)]"
-              >
-                保存
-              </button>
-            )}
-          </div>
-        ) : (
-          <>
-            <div className="flex items-center gap-2">
-              <label className="w-16 shrink-0 text-xs text-zinc-400">モデル</label>
-              {ollamaModels && ollamaModels.length > 0 ? (
-                // 一覧取得成功 → ドロップダウン（選択で即保存） / Models loaded → dropdown (saves on change)
-                <select
-                  value={settings?.ollamaModel ?? ""}
-                  onChange={(e) => settings && applySettings({ ...settings, ollamaModel: e.target.value })}
-                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
-                >
-                  {settings?.ollamaModel && !ollamaModels.includes(settings.ollamaModel) && (
-                    <option value={settings.ollamaModel}>{settings.ollamaModel}（未インストール？）</option>
-                  )}
-                  {ollamaModels.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                // 一覧未取得（未起動等）→ 手入力にフォールバック / No list → manual entry
-                <input
-                  type="text"
-                  placeholder={loadingModels ? "モデル一覧を取得中…" : "モデル名（例: qwen2.5vl）"}
-                  value={draft?.ollamaModel ?? settings?.ollamaModel ?? ""}
-                  onChange={(e) => setDraft((d) => ({ ...d, ollamaModel: e.target.value }))}
-                  onBlur={async () => {
-                    if (settings && draft?.ollamaModel !== undefined) {
-                      if (await applySettings({ ...settings, ollamaModel: (draft.ollamaModel ?? "").trim() }))
-                        setDraft((d) => ({ ...d, ollamaModel: undefined }));
-                    }
-                  }}
-                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
-                />
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="ollama-url">
-                URL
-              </label>
-              <input
-                id="ollama-url"
-                type="text"
-                placeholder="http://127.0.0.1:11434"
-                value={draft?.ollamaUrl ?? settings?.ollamaUrl ?? ""}
-                onChange={(e) => setDraft((d) => ({ ...d, ollamaUrl: e.target.value }))}
-                onBlur={async () => {
-                  if (settings && draft?.ollamaUrl !== undefined) {
-                    const url = (draft.ollamaUrl ?? "").trim() || DEFAULT_SETTINGS.ollamaUrl;
-                    if (await applySettings({ ...settings, ollamaUrl: url }))
-                      setDraft((d) => ({ ...d, ollamaUrl: undefined }));
-                  }
-                }}
-                className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
-              />
-              <button
-                onClick={() => fetchOllamaModels(draft?.ollamaUrl ?? settings?.ollamaUrl ?? DEFAULT_SETTINGS.ollamaUrl)}
-                disabled={loadingModels}
-                title="モデル一覧を再取得"
-                className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
-              >
-                {loadingModels ? "…" : "🔄"}
-              </button>
-            </div>
-            {!loadingModels && ollamaModels === null && (
-              <p className="text-xs text-zinc-500">
-                Ollamaに接続できません。起動状態とURLを確認し🔄で再取得するか、モデル名を直接入力してください。
-              </p>
-            )}
-            {ollamaModels !== null && ollamaModels.length === 0 && (
-              <p className="text-xs text-zinc-500">
-                インストール済みモデルがありません（例: `ollama pull qwen2.5vl`）。
-              </p>
-            )}
-          </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="w-16 shrink-0 text-xs text-zinc-400" htmlFor="ollama-url">
+            URL
+          </label>
+          <input
+            id="ollama-url"
+            type="text"
+            placeholder="http://127.0.0.1:11434"
+            value={draft?.ollamaUrl ?? settings?.ollamaUrl ?? ""}
+            onChange={(e) => setDraft((d) => ({ ...d, ollamaUrl: e.target.value }))}
+            onBlur={async () => {
+              if (settings && draft?.ollamaUrl !== undefined) {
+                const url = (draft.ollamaUrl ?? "").trim() || DEFAULT_SETTINGS.ollamaUrl;
+                if (await applySettings({ ...settings, ollamaUrl: url }))
+                  setDraft((d) => ({ ...d, ollamaUrl: undefined }));
+              }
+            }}
+            className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
+          />
+          <button
+            onClick={() => fetchOllamaModels(draft?.ollamaUrl ?? settings?.ollamaUrl ?? DEFAULT_SETTINGS.ollamaUrl)}
+            disabled={loadingModels}
+            title="モデル一覧を再取得"
+            className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"
+          >
+            {loadingModels ? "…" : "🔄"}
+          </button>
+        </div>
+        {!loadingModels && ollamaModels === null && (
+          <p className="text-xs text-zinc-500">
+            Ollamaに接続できません。起動状態とURLを確認し🔄で再取得するか、モデル名を直接入力してください。
+          </p>
+        )}
+        {ollamaModels !== null && ollamaModels.length === 0 && (
+          <p className="text-xs text-zinc-500">
+            インストール済みモデルがありません（例: `ollama pull qwen2.5vl`）。
+          </p>
         )}
       </section>
+
 
       {error && <p className="text-xs text-red-400">{error}</p>}
 
@@ -944,7 +899,7 @@ function Home() {
             hotkeyFullscreen: DEFAULT_SETTINGS.hotkeyFullscreen,
           })
         }
-        title="ショートカットを初期設定に戻す（APIキー・Ollama設定は保持）"
+        title="ショートカットを初期設定に戻す（Ollama設定は保持）"
         className="mt-2 rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
       >
         ショートカットを既定に戻す

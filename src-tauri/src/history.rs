@@ -59,9 +59,31 @@ pub fn list_history(app: AppHandle, limit: Option<usize>) -> Result<Vec<HistoryE
         .collect())
 }
 
+/// フロントから渡されたパスを履歴フォルダ内のファイルに限定して解決する。
+/// 履歴の各コマンドは list_history / get_pending_recording が返したパスしか受け取らない前提なので、
+/// それ以外（`..` を含む細工や無関係な絶対パス）はここで弾き、任意ファイルの読み取り・複製・削除を防ぐ。
+/// Resolve a frontend-supplied path, confined to the history folder. These commands only ever
+/// receive paths that list_history / get_pending_recording produced, so anything else (a crafted
+/// `..`, an unrelated absolute path) is rejected here — no arbitrary file read/copy/delete.
+pub fn resolve_in_history(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
+    let dir = history_dir(app)
+        .and_then(|d| Ok(d.canonicalize()?))
+        .map_err(|e| e.to_string())?;
+    // canonicalizeはシンボリックリンクも解決するため、リンク経由の脱出も塞げる
+    // canonicalize resolves symlinks too, so link-based escapes are covered
+    let target = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|_| "ファイルが見つかりません / file not found".to_string())?;
+    if !target.starts_with(&dir) {
+        return Err("履歴フォルダ外のファイルは操作できません / path outside the history folder".into());
+    }
+    Ok(target)
+}
+
 /// 履歴の画像をエディタで開く / Open a history image in the editor
 #[tauri::command]
 pub async fn edit_history(app: AppHandle, path: String) -> Result<(), String> {
+    let path = resolve_in_history(&app, &path)?;
     let png = fs::read(&path).map_err(|e| e.to_string())?;
     let image = xcap::image::load_from_memory(&png)
         .map_err(|e| e.to_string())?
