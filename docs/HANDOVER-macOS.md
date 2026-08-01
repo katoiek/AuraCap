@@ -1,136 +1,257 @@
-# macOSビルド引き継ぎ / macOS Build Handover
+# macOS 引き継ぎ / macOS Handover
 
-> 対象コミット / Baseline: `main` (0.1.5)
-> 目的 / Goal: 現在Windows専用のAuraCapを **macOSでビルド・起動できる状態**にする。
-> まずは「無料版＝静止画キャプチャ＋エディタ」だけをmacOSで動かすのが最短ルート。録画・Smart Redactは後回しでよい。
-> Start by getting the **free tier (still capture + editor)** compiling on macOS. Recording and Smart Redact can come later.
-
----
-
-## 0. 現状サマリ / Current State
-
-- スタック / Stack: **Tauri v2 + Rust backend + React 19 / TypeScript / Vite 7 / Tailwind 4**
-- フロントエンド（`src/`）は **完全にクロスプラットフォーム**。macOS固有の対応は不要。
-  The frontend is fully cross-platform; nothing macOS-specific is needed there.
-- 問題は **Rustバックエンド（`src-tauri/src/`）が Win32 / WinRT API を無防備に直接呼んでいる** 点。
-  `#[cfg(target_os = ...)]` ガードが一切ないため、**macOSでは現状コンパイルが通らない**。
-  The Rust backend calls Win32/WinRT APIs with **no `cfg` guards**, so it will not compile on macOS as-is.
-
-### Windows依存の内訳 / Where the Windows coupling lives
-
-| ファイル / File | 依存API | 機能 / Feature | クロスプラットフォーム性 |
-|---|---|---|---|
-| `capture.rs` | Win32 (DWM, HWND列挙, `GetCursorPos`) | ウィンドウ単位キャプチャ・カーソル位置 | 静止画のコア取得は **`xcap`（クロスプラットフォーム）**。ウィンドウ列挙だけがWin32 |
-| `recorder.rs` | `windows-capture` クレート (Windows Graphics Capture) | 画面録画（Pro機能） | **macOS非対応**。別実装が必要 |
-| `redact.rs` | WinRT `Media.Ocr` | Smart Redact（OCRで機密自動検出） | **macOS非対応**。Vision.framework等で置換が必要 |
-
-`bridge.rs` / `codegen.rs` / `editor.rs` / `history.rs` / `pin.rs` / `settings.rs` / `lib.rs` は **Win32非依存**（そのまま動くはず）。
-
-> **コード生成（Screenshot-to-Code）はクロスプラットフォーム**。Ollama通信は `codegen.rs`（reqwest）経由に移行済みで、WebViewのCORS制約を受けない。Claude APIパスも `fetch` + `anthropic-dangerous-direct-browser-access` でOS非依存。macOSでもそのまま動く見込み。
-> Code generation (Screenshot-to-Code) is cross-platform: Ollama traffic now goes through `codegen.rs` (reqwest), free of the WebView CORS constraint; the Claude path is OS-independent too.
+> **対象**: `main` = タグ `v1.0.0`（コミット `90a36d1`）
+> **目的**: 1.0 の macOS 版をビルドし、Windows 側で検証できなかった項目を実機で確認して、既存の GitHub Release に追加する。
+> **最終更新**: 2026-08-02 / 直前の作業環境: Windows 11
 
 ---
 
-## 1. 事前準備 / Prerequisites (macOS)
+## 0. 現状サマリ
+
+**macOS への移植は完了しています。** 0.1.5 時点のハンドオーバーにあった「Rust が Win32 を無防備に呼んでいてコンパイルが通らない」問題は解決済みで、macOS ビルドが成功することは確認されています（コミット `8fc4832`）。
+
+| 項目 | 状態 |
+|---|---|
+| Windows 版 1.0.0 | リリース済み（private リポジトリ、タグ `v1.0.0`、インストーラー添付済み） |
+| macOS 版 1.0.0 | **未ビルド・未検証** ← このドキュメントの作業対象 |
+| リポジトリ公開範囲 | PRIVATE |
+| コード署名 | Windows・macOS ともに **未署名** |
+
+### プラットフォーム別の機能
+
+| 機能 | Windows | macOS |
+|---|---|---|
+| 静止画キャプチャ（矩形 / ウィンドウ / 全画面） | ✅ | ✅ |
+| 軽量エディタ・履歴・付箋 | ✅ | ✅ |
+| 画面録画 | ✅ WGC | ✅ ScreenCaptureKit（**macOS 15+** が必要） |
+| コード生成（Ollama） | ✅ | ✅ |
+| 自動マスク（Smart Redact） | ✅ WinRT OCR | ❌ `redact_stub.rs` が「未対応」を返す |
+| テキスト抽出 | ✅ WinRT OCR | ❌ 同上 |
+
+Smart Redact とテキスト抽出の macOS 対応は `Vision.framework`（`VNRecognizeTextRequest`）での置換が必要ですが、1.0 のスコープ外です。
+
+---
+
+## 1. 直近のセッションで入った変更
+
+タグ `v1.0.0` は以下の2コミットを含みます。macOS 側で確認すべき点が生じているのはこの変更群です。
+
+### `bce486e` 1.0リリース準備
+
+- **セキュリティ**: ブリッジの CSRF 対策、CSP 有効化、履歴コマンドのパス限定、ルーペの整数オーバーフロー修正
+- **Claude API 連携を削除**: コード生成はローカル Ollama のみ。旧バージョンが平文保存していた API キーは起動時に `settings.json` から自動削除される
+- **Editor.tsx を分割**: 1515行 → 1008行。`src/editor/{model.ts, raster.ts, Toolbar.tsx, ToolIcon.tsx, ResultModal.tsx}`
+- **録画 UX**: 選択確定から録画開始まで枠を出したままにし、枠の中央にカウントダウンを表示
+
+### `90a36d1` リリース整備
+
+- アイコン・favicon、ライセンス本文の同梱、npm 依存の整理
+
+---
+
+## 2. macOS で確認が必要な3点
+
+Windows 側では検証済みですが、**macOS では未検証**です。設計上は動くはずという根拠と、駄目だった場合の直し方を添えます。
+
+### 2-1. CSP（最重要）
+
+1.0 で Content Security Policy を有効化しました（`src-tauri/tauri.conf.json` の `csp` / `devCsp`）。
+
+カスタムプロトコルの URL 形式は OS で異なります。
+
+- Windows: `http://freeze.localhost/...`
+- macOS: `freeze://localhost/...`
+
+CSP には **スキームのみの指定**（`freeze:` `loupe:` `edit:` `pin:` `asset:`）と Windows 形式の両方を書いてあります。スキームソースは仕様上どちらの形式にもマッチするため macOS でも通る想定ですが、実機で確認していません。
+
+**許可漏れがあるとエラーダイアログは出ず、該当画面だけが無言で壊れます。** 特にルーペは `fetch` の失敗を握り潰しているため「拡大鏡が出ない」だけが症状になります。
+
+**直し方**: DevTools（`Cmd+Option+I`）の Console に `Refused to load ... "img-src ..."` のようにブロックされた URL と違反したディレクティブが出ます。URL の形から追加先を決めます。
+
+| ブロックされた URL | 追加先ディレクティブ |
+|---|---|
+| `freeze://...` `edit://...` `pin://...` | `img-src` |
+| `loupe://...` | `connect-src` |
+| `asset://...` | 画像なら `img-src`、動画なら `media-src` |
+
+`csp` と `devCsp` の**両方**に追加してください。
+
+### 2-2. カウントダウンの録画への写り込み
+
+録画開始前のカウントダウンは選択範囲の**内側**に表示されます。`recorder.rs` の `run_countdown()` は、窓を隠してから `HIDE_SETTLE_MS = 200`（ミリ秒）待って録画を開始することで写り込みを防いでいます。
+
+この 200ms は **Windows の DWM を前提に決めた値**です。macOS のコンポジタ（WindowServer）では足りない可能性があります。
+
+**確認方法**: 矩形で動画キャプチャ → 生成された MP4 の冒頭を再生し、中央にカウントダウンのバッジが残っていないか見る。フレーム単位で確かめるなら:
 
 ```sh
-# Xcode Command Line Tools
-xcode-select --install
-
-# Rust（rustup推奨）
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Node.js 20+（Windows側と揃える）
-# nvm等で
-
-# 依存インストール
-npm install
+ffmpeg -i ~/Pictures/AuraCap/History/auracap_YYYYMMDD_HHMMSS.mp4 -frames:v 6 /tmp/f_%02d.png
 ```
 
-Tauri v2のmacOS前提は公式ドキュメント参照: https://v2.tauri.app/start/prerequisites/
+**直し方（2案）**:
+
+1. **手軽**: `recorder.rs` の `HIDE_SETTLE_MS` を 400〜600 に増やす。待ち時間の合計は変わらない設計なので副作用はない
+2. **確実（macOS のみ・推奨）**: `begin_recording()` の macOS 実装にある
+
+   ```rust
+   let filter = SCContentFilter::create()
+       .with_display(&display)
+       .with_excluding_windows(&[])   // ← ここ
+       .build();
+   ```
+
+   に AuraCap 自身のウィンドウを渡す。ScreenCaptureKit のレベルで確実に除外できるため、タイミングに依存しなくなります。`SCShareableContent::get()` から得られる `windows()` を自プロセスの PID で絞り込んで渡します
+
+### 2-3. カウントダウン窓の透過
+
+新しく追加した `reccountdown` ウィンドウは `.transparent(true)` を使います。macOS では `macOSPrivateApi: true` が必要ですが、`tauri.conf.json` に設定済みであることは確認済みです。
+
+`skip_taskbar` は macOS では無効ですが、既存の録画枠バー窓も同じ指定なので新たな問題ではありません。
 
 ---
 
-## 2. 最短でビルドを通す手順（無料版スコープ） / Minimal path to a building free-tier
+## 3. ビルド手順
 
-**方針**: 録画とOCRを **Windows限定**にフィーチャゲートし、macOSではそれらを無効化（もしくはstub）してビルドを通す。
-
-### 2-1. `Cargo.toml` のWindows依存をターゲット限定にする
-
-現在は無条件依存。以下のように **`[target.'cfg(windows)'.dependencies]`** へ移動する:
-
-```toml
-# 共通（クロスプラットフォーム） / cross-platform
-[dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
-tauri-plugin-opener = "2"
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-single-instance = "2"
-tauri-plugin-autostart = "2"        # macOSはLaunchAgentで動作（対応済みプラグイン）
-tauri-plugin-dialog = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = "0.4.45"
-tiny_http = "0.12"
-regex = "1"
-reqwest = { version = "0.12", features = ["json"] }  # Ollama通信（macOS対応、CORS無関係）
-xcap = "0.9.6"                       # ★静止画キャプチャのコア（macOS対応）
-arboard = "3.6.1"                    # ★クリップボード（macOS対応）
-
-# Windows専用 / Windows-only
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [ /* 既存のfeature一式 */ ] }
-windows-capture = "2.0.0"           # 録画
+```sh
+git pull origin main          # または git checkout v1.0.0
+npm ci
+npx tsc --noEmit
+npm audit --omit=dev          # 0件になるはず
+cd src-tauri && cargo clippy --all-targets && cd ..
+npm run tauri build
 ```
 
-### 2-2. Rustコードを `#[cfg]` で分岐
+出力先:
+- `src-tauri/target/release/bundle/dmg/` — DMG
+- `src-tauri/target/release/bundle/macos/` — .app
 
-- **`recorder.rs` 全体**を `#[cfg(windows)]` で囲む。`lib.rs` 側の `mod recorder;` と、録画系Tauriコマンドの登録（`invoke_handler`）も同様にガード。
-  macOS向けにはコマンドだけ残して `Err("recording is Windows-only".into())` を返すstubを `#[cfg(not(windows))]` で用意すると、フロントの呼び出しが壊れない。
-- **`redact.rs`** のOCR部分（`extract` / `OcrEngine` 周り）を同様に `#[cfg(windows)]` 化。macOSは `#[cfg(not(windows))]` で空文字/未対応エラーを返すstub。
-- **`capture.rs`** のウィンドウ列挙（460行付近〜, `GetCursorPos` など）を `#[cfg(windows)]` に。
-  - カーソル位置は Tauri の `window.cursor_position()` 等でクロスプラットフォーム化できる。
-  - ウィンドウ単位キャプチャは `xcap::Window::all()`（xcapはウィンドウ列挙もサポート）へ寄せると理想。まずはmacOSで「領域＋全画面」だけ動けば無料版としては十分。
+### ⚠️ THIRD-PARTY-LICENSES.txt を macOS で再生成しないこと
 
-> ゴールの目安 / Definition of done for step 2:
-> `npm run tauri dev` がmacOSで起動し、**領域キャプチャ→エディタ編集→保存/コピー** が一通り動く。
+`scripts/gen_third_party_notices.mjs` は、ローカルの cargo レジストリと `node_modules` から**実ファイル**を読んでライセンス本文を集めます。macOS のレジストリには Windows 専用クレート（`windows`, `windows-capture` 等）のソースが落ちていないため、macOS で再生成すると**収録内容が減ります**。
+
+現在コミットされているものは Windows 側で生成した全プラットフォーム分です。依存を変更していない限り、そのまま使ってください。
 
 ---
 
-## 3. macOS固有の実行時ハマりどころ / macOS runtime gotchas
+## 4. 検証チェックリスト
 
-1. **画面収録の許可 (TCC)**: `xcap` でのスクリーンキャプチャは *システム設定 → プライバシーとセキュリティ → 画面収録* でアプリ許可が必要。初回は許可後に**再起動が要る**ことがある。
-2. **グローバルショートカット**: 現在の既定は `PrintScreen` / `Ctrl+PrintScreen` / `Shift+PrintScreen`。**Macキーボードに PrintScreen は無い**。macOS向け既定を用意すること（例: `Cmd+Shift+2` 等、OS標準の `Cmd+Shift+3/4/5` と衝突しない組み合わせ）。`tauri-plugin-global-shortcut` 登録箇所（`lib.rs`）で `#[cfg(target_os="macos")]` 分岐。
-   - グローバルショートカットには *アクセシビリティ* 許可が必要な場合あり。
-3. **メニュー/トレイ**: macOSのトレイ（メニューバー）挙動はWindowsと異なる。アイコンはテンプレート画像（黒＋アルファ）が望ましい。動作確認を。
-4. **アイコン**: `bundle.icon` に `icons/icon.icns` は既に含まれている。不足時は `npm run tauri icon <source-1024.png>` で再生成。
-5. **署名・公証 / Signing & notarization**: 配布時はApple Developer証明書での署名とnotarizationが必要。ローカル動作確認だけなら不要。
-6. **透明オーバーレイ窓**: 領域選択は透明窓＋SVGマスク方式（`Overlay.tsx`）。macOSでも透明窓は動くが、複数モニタの座標系・DPI（`devicePixelRatio`）挙動が異なるため、ルーペのピクセル対応（`LOUPE_*` 定数）と座標計算は実機で要確認。
+DevTools は各ウィンドウで `Cmd+Option+I`。ウィンドウごとに別インスタンスです。
+
+### 事前
+
+- [ ] 初回起動時、右クリック → 開く で Gatekeeper を通す（未署名のため）
+- [ ] システム設定 → プライバシーとセキュリティ → 画面収録 で AuraCap を許可
+  （バイナリが変わると再度求められることがある）
+
+### CSP 関連（2-1 の検証）
+
+- [ ] 領域キャプチャで凍結フレームが見える（`freeze:`）
+- [ ] 選択中にルーペ（拡大鏡）が表示される（`loupe:` / connect-src）
+- [ ] エディタに画像が表示される（`edit:`）
+- [ ] エディタの「コピー」「保存」が成功する（canvas の CORS 汚染がないこと）
+- [ ] 付箋（ピン留め）に画像が表示される（`pin:`）
+- [ ] 履歴一覧のサムネイルが並ぶ（`asset:` / img-src）
+- [ ] 履歴の録画プレビューが再生できる（`asset:` / media-src）
+- [ ] Console に `Refused to` が1件も出ていない
+
+### 録画（2-2 の検証）
+
+- [ ] 矩形で動画キャプチャ → 選択確定した瞬間から枠が出たままになる
+- [ ] 枠の中央に 3 → 2 → 1 のカウントダウンが出る
+- [ ] **録画された MP4 の冒頭に数字が写り込んでいない**
+- [ ] ウィンドウモードでも同様
+- [ ] 全画面録画（枠・カウントダウンなしで開始する。現状の仕様）
+
+### その他
+
+- [ ] ホットキー（`Cmd+Shift+2` / `Cmd+Shift+1` / `Cmd+Shift+6`）が効く
+      ※アクセシビリティ許可が必要な場合あり
+- [ ] `~/Pictures/AuraCap/History` へ自動保存＋クリップボードコピー
+- [ ] エディタの全ツール（矩形 / 矢印 / テキスト / ハイライト / ぼかし / バッジ / トリミング）
+- [ ] コード生成（Ollama 起動時）
+- [ ] 自動マスク・テキスト抽出が「未対応」のトーストを返し、クラッシュしない
+- [ ] トレイ（メニューバー）アイコンとメニューが機能する
+
+### ブラウザ拡張
+
+- [ ] `chrome://extensions` → デベロッパーモード → `extension/` を読み込む
+- [ ] 通常の https ページでツールバーボタン → 緑の OK バッジ、エディタにページ全体が入る
+
+拡張は `X-AuraCap-Bridge` ヘッダを送ります。ブリッジ側（`bridge.rs`）はこのヘッダを必須とし、Web ページ由来（http/https）の Origin を拒否します。拡張の Origin（`chrome-extension://`）は通ります。
+
+判定ロジックだけ確かめるなら:
+
+```sh
+# 403 を期待（ヘッダ無し）
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:14820/capture --data "x"
+# 400 を期待（受理され、画像として不正なので400）
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:14820/capture -H "X-AuraCap-Bridge: 1" --data "x"
+```
 
 ---
 
-## 4. 検証チェックリスト / Verification checklist
+## 5. リリースへの追加
 
-- [ ] `npm install` 成功
-- [ ] `npm run tauri dev` でウィンドウ起動
-- [ ] 画面収録許可を付与後、**領域キャプチャ**が撮れる
-- [ ] エディタで 選択/矩形/矢印/テキスト/ハイライト/ぼかし/バッジ/トリミング が動く
-- [ ] `Pictures/AuraCap/History` 相当（macOSは `~/Pictures/AuraCap/History`）へ自動保存＆クリップボードコピー
-- [ ] 全画面（モニタ単位）キャプチャ
-- [ ] コード生成：設定でOllama選択→ローカルモデルがドロップダウンに出る→生成が通る（`codegen.rs`経由）
-- [ ] （後回し可）ウィンドウ単位キャプチャ
-- [ ] （Pro / 後回し）録画・Smart Redact のstubがビルドを壊さない
-- [ ] `npm run tauri build` で `.app` / `.dmg` が生成される
+検証が通ったら既存のリリースに DMG を追加します。
 
----
+```sh
+gh release upload v1.0.0 src-tauri/target/release/bundle/dmg/AuraCap_1.0.0_aarch64.dmg
+```
 
-## 5. スコープ判断メモ / Scope notes
+ファイル名は実際の出力に合わせてください（Apple Silicon = `aarch64`、Intel = `x64`）。
 
-- **無料版 = 静止画キャプチャ＋エディタ**は `xcap` + `arboard` でmacOS移植コストが低い。まずここを完成させる。
-- **録画（recorder.rs / windows-capture）** はmacOSでは `ScreenCaptureKit`（macOS 12.3+）ベースの別実装が必要。Rustからは `scap` クレート等が候補。Pro機能なので段階的に。
-- **Smart Redact（redact.rs / WinRT OCR）** はmacOSでは `Vision.framework`（`VNRecognizeTextRequest`）で置換。これもPro寄り機能なので後回し。
-- **コード生成** は移植作業不要（`codegen.rs` / `Editor.tsx` がクロスプラットフォーム）。無料版に含めてよい。
+**リリースノートの修正も必要です。** 現在「Windows 64bit 向けのみです」と書かれているため、macOS バイナリを追加したらその記述と SHA256 の節を更新してください。
+
+```sh
+shasum -a 256 src-tauri/target/release/bundle/dmg/*.dmg
+gh release edit v1.0.0 --notes-file <更新したノート>
+```
 
 ---
 
-*最終更新 / Last updated: 2026-07-14（v0.1.5対応：Ollama通信のRust化・reqwest追加を反映） — 引き継ぎ作成: Claude (Opus 4.8)*
+## 6. 落とし穴（実際に踏んだもの）
+
+### capabilities に窓を登録し忘れる
+
+`src-tauri/capabilities/default.json` の `windows` 配列に載っていないウィンドウでは、`invoke()` も `listen()` も**エラーを出さずに拒否**されます。カウントダウン機能の実装時、これで「円は描画されるが数字が出ない」という状態になり、原因特定に時間を要しました。
+
+新しいウィンドウを追加して Tauri API を呼ぶ場合は、必ずこのリストに追加してください。描画しかしないウィンドウ（`recframe-*`）は最小権限のため意図的に除外しています。
+
+### Chrome 拡張の fetch には Origin が付く
+
+MV3 の Service Worker からの `fetch()` には、ブラウザが `Origin: chrome-extension://<id>` を自動付与します。「Origin があれば拒否」という実装にすると正規の拡張まで弾かれます（`bridge.rs` は http/https の Origin のみ拒否する実装になっています）。
+
+### 開発モードでは本番 CSP を検証できない
+
+Tauri は開発時に `devCsp`、本番ビルドで `csp` を適用します。本番 CSP を DevTools 付きで確認するには:
+
+```sh
+npm run tauri build -- --debug
+```
+
+CSP は `<meta>` タグではなく **HTTP レスポンスヘッダ**で配信されます。DevTools の Network タブ → ドキュメントのリクエスト → Response Headers で確認できます。
+
+---
+
+## 7. バージョン管理
+
+バージョンは以下4ファイルで一致させます。ずれると診断が混乱します。
+
+| ファイル | 項目 |
+|---|---|
+| `package.json` | `version` |
+| `src-tauri/Cargo.toml` | `[package] version` |
+| `src-tauri/tauri.conf.json` | `version` |
+| `extension/manifest.json` | `version` |
+
+リリース手順の全体は [RELEASE.md](./RELEASE.md)、ドメイン用語は [../CONTEXT.md](../CONTEXT.md)、設計判断は [adr/](./adr/) を参照してください。
+
+---
+
+## 8. 既知の制約
+
+- **Mac App Store で配布できません。** オーバーレイの透明ウィンドウに `macOSPrivateApi: true` が必要なためです。Developer ID による直接配布のみ
+- **署名・公証が未対応。** Gatekeeper の警告を消すには Apple Developer Program（年 $99）の "Developer ID Application" 証明書での署名＋公証の両方が必要です。詳細と費用比較は [RELEASE.md](./RELEASE.md) の「コード署名」節
+- **動画録画は macOS 15 以降が必要。** `SCRecordingOutput`（`screencapturekit` の `macos_15_0` feature）に依存しています
+- **全画面録画にはカウントダウンが出ません。** 枠が存在しないためで、実装する場合はモニター矩形の取得に DPI 変換（macOS はポイント単位）の対応が必要です
+- **自動マスク・テキスト抽出は Windows 専用**（WinRT OCR 依存）
