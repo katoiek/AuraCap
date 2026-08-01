@@ -34,9 +34,16 @@ AuraCap はプロプライエタリ配布なので、同梱するOSSの表示義
 node scripts/gen_third_party_notices.mjs
 ```
 
-生成される `THIRD-PARTY-NOTICES.md` は一覧（パッケージ名・バージョン・ライセンス識別子）まで。
-**Apache-2.0 / BSD / ISC / MPL-2.0 / Unicode-3.0 / BSL-1.0 は全文の同梱が必要**なので、
-一般公開する前にライセンス全文を `licenses/` に集めてインストーラーへ含めること（未対応）。
+2つのファイルが生成される。
+
+- `THIRD-PARTY-NOTICES.md` — 一覧（パッケージ名・バージョン・ライセンス識別子）
+- `THIRD-PARTY-LICENSES.txt` — ライセンス本文。cargoレジストリと node_modules から
+  実ファイルを読むので、上流が配っているものそのままが入る
+
+本文を同梱していないクレートは末尾に列挙される（多くはAndroid/Linux専用でWindows・macOSの
+ビルドには含まれないもの、およびデュアルライセンスで本文を置いていないもの）。
+`cargo metadata --all-features` は全プラットフォーム分を列挙するため、この一覧は
+実際の配布物より広い側に振れている（過小開示にはならない）。
 
 ## 4. 配布ビルド
 

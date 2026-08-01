@@ -3,8 +3,16 @@
   "name": "AuraCap フルページキャプチャ",
   "version": "1.0.0",
   "description": "表示中のページ全体をキャプチャしてAuraCapへ送ります / Capture the full page into AuraCap",
+  "icons": {
+    "32": "icons/32.png",
+    "128": "icons/128.png"
+  },
   "action": {
-    "default_title": "AuraCapでフルページキャプチャ"
+    "default_title": "AuraCapでフルページキャプチャ",
+    "default_icon": {
+      "32": "icons/32.png",
+      "128": "icons/128.png"
+    }
   },
   "permissions": ["debugger", "activeTab"],
   "host_permissions": ["http://127.0.0.1:14820/*"],
