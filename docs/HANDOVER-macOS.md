@@ -6,6 +6,26 @@
 
 ---
 
+## 最初に実行すること / Start here
+
+**このドキュメントに書かれている機能はすべて `main` にコミット済み・push済みです。** 未コミットの作業はありません。
+
+Mac 側のワーキングコピーが古いと「ドキュメントにある機能がコードに無い＝未コミット」と誤認しやすいので、作業前に必ず同期と確認を行ってください。
+
+```sh
+git checkout main && git pull origin main
+git log --oneline -3          # 8db7b9d が先頭にあること
+
+# 録画カウントダウン機能が入っているかの確認（すべて 1 以上が返れば OK）
+grep -c reccountdown src-tauri/src/recorder.rs src-tauri/capabilities/default.json
+grep -c 'countdown=1' src/App.tsx
+```
+
+参考: 主要な機能がどのコミットで入ったかは `git log -S "<識別子>" --oneline` で特定できます。
+例）`git log -S "run_countdown" --oneline` → `bce486e`
+
+---
+
 ## 0. 現状サマリ
 
 **macOS への移植は完了しています。** 0.1.5 時点のハンドオーバーにあった「Rust が Win32 を無防備に呼んでいてコンパイルが通らない」問題は解決済みで、macOS ビルドが成功することは確認されています（コミット `8fc4832`）。
