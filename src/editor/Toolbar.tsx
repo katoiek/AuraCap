@@ -23,13 +23,12 @@ export type ToolbarProps = {
   onHighlightOpacity: (opacity: number) => void;
   textColor: string;
   onTextColor: (color: string) => void;
-  redacting: boolean;
-  onRedact: () => void;
   extracting: boolean;
   onExtractText: () => void;
   generating: boolean;
   genElapsed: number;
   onCodegen: () => void;
+  codegenEnabled: boolean;
   scale: number;
   zoom: number | null;
   onZoomStep: (dir: 1 | -1) => void;
@@ -157,15 +156,6 @@ function Toolbar(p: ToolbarProps) {
         </div>
       )}
       <div className="mx-2 h-6 w-px bg-zinc-700" />
-      {/* Smart Redact（ローカルOCR） / Smart Redact (local OCR) */}
-      <button
-        onClick={p.onRedact}
-        disabled={p.redacting}
-        title="メール・電話番号・APIキー等を検出してぼかします（ローカル処理、外部送信なし）"
-        className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-      >
-        {p.redacting ? "検出中…" : "🛡 自動マスク"}
-      </button>
       {/* テキスト抽出（ローカルOCR） / Text extraction (local OCR) */}
       <button
         onClick={p.onExtractText}
@@ -175,15 +165,18 @@ function Toolbar(p: ToolbarProps) {
       >
         {p.extracting ? "抽出中…" : "📋 テキスト抽出"}
       </button>
-      {/* Screenshot-to-Code（ローカルOllama） / Screenshot-to-Code (local Ollama) */}
-      <button
-        onClick={p.onCodegen}
-        disabled={p.generating}
-        title="このスクリーンショットからTailwind CSSのHTMLを生成します（ローカルのOllamaで処理、外部送信なし）"
-        className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
-      >
-        {p.generating ? `生成中… ${p.genElapsed}s` : "⧉ コード生成"}
-      </button>
+      {/* Screenshot-to-Code（ローカルOllama）。メイン画面の設定でOFFなら出さない */}
+      {/* Screenshot-to-Code (local Ollama); hidden when turned OFF in the main window settings */}
+      {p.codegenEnabled && (
+        <button
+          onClick={p.onCodegen}
+          disabled={p.generating}
+          title="このスクリーンショットからTailwind CSSのHTMLを生成します（ローカルのOllamaで処理、外部送信なし）"
+          className="rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+        >
+          {p.generating ? `生成中… ${p.genElapsed}s` : "⧉ コード生成"}
+        </button>
+      )}
       <div className="mx-2 h-6 w-px bg-zinc-700" />
       {/* 表示ズーム / Display zoom */}
       <button

@@ -13,12 +13,10 @@ A screen capture tool for Windows and macOS, built with Tauri v2 + Rust. Everyth
   **Quick editor**: rectangles, arrows, text, highlights, blur, numbered badges and crop — all re-editable until export
 - **画面録画**: 全画面・領域をMP4で録画（Windows: Windows Graphics Capture / macOS: ScreenCaptureKit）
   **Screen recording**: full-screen or region capture to MP4 (Windows Graphics Capture / ScreenCaptureKit)
-- **自動マスク（Smart Redact）**: メール・電話番号・カード番号・APIキー等をOCRで検出して自動でぼかす（Windowsのみ）
-  **Smart Redact**: detects emails, phone numbers, card numbers and API keys via OCR and blurs them automatically (Windows only)
 - **テキスト抽出**: 画像内の文字をOCRで読み取ってコピー（Windowsのみ）
   **Text extraction**: read on-image text with OCR and copy it (Windows only)
-- **コード生成（Screenshot-to-Code）**: スクリーンショットからTailwind CSSのHTMLを生成。ローカルの [Ollama](https://ollama.com/) で処理
-  **Screenshot-to-Code**: generate Tailwind CSS HTML from a screenshot, processed locally via [Ollama](https://ollama.com/)
+- **コード生成（Screenshot-to-Code）**: スクリーンショットからTailwind CSSのHTMLを生成。ローカルの [Ollama](https://ollama.com/) で処理。設定画面でOn/Off可能（Offにするとエディタのボタンも消える）
+  **Screenshot-to-Code**: generate Tailwind CSS HTML from a screenshot, processed locally via [Ollama](https://ollama.com/). Toggleable in settings (turning it off also hides the editor button)
 - **全自動履歴保存**: 撮影した瞬間に `ピクチャ/AuraCap/History` へPNG保存＋クリップボードへコピー
   **Auto history**: every capture is saved to `Pictures/AuraCap/History` and copied to the clipboard
 - **付箋（ピン留め）**: 編集後の画像を常に最前面のフローティング窓としてデスクトップに貼り付け
@@ -45,12 +43,12 @@ Shortcuts are configurable in settings and can be disabled entirely. Every actio
 ## プライバシー / Privacy
 
 - キャプチャ画像・録画は `ピクチャ/AuraCap/History` にのみ保存されます。外部への送信は一切ありません。
-- 自動マスクとテキスト抽出はOS標準のOCR（Windows）を使い、完全にローカルで動きます。
+- テキスト抽出はOS標準のOCR（Windows）を使い、完全にローカルで動きます。
 - コード生成は自分で立てたOllamaへのみ画像を送ります。送信先URLは設定画面で確認・変更できます。
 - ブラウザ拡張との連携は `127.0.0.1:14820` のループバック限定で、拡張だけが付けられるヘッダを必須にしています。閲覧中のWebページから画像を投入することはできません。
 
 - Captures and recordings are written only to `Pictures/AuraCap/History`; nothing is uploaded anywhere.
-- Smart Redact and text extraction use the OS's built-in OCR (Windows) and run entirely locally.
+- Text extraction uses the OS's built-in OCR (Windows) and runs entirely locally.
 - Screenshot-to-Code sends images only to the Ollama instance you run yourself; the target URL is visible and editable in settings.
 - The browser-extension bridge is loopback-only (`127.0.0.1:14820`) and requires a header only the extension can set, so web pages you visit cannot push images into AuraCap.
 

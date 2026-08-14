@@ -23,6 +23,9 @@ pub struct Settings {
     pub hotkey_region: String,
     pub hotkey_window: String,
     pub hotkey_fullscreen: String,
+    /// Screenshot-to-Code（AIによるコード生成）を使うか。OFFならEditor側にボタンを出さない
+    /// Whether Screenshot-to-Code (AI codegen) is enabled; OFF hides the button in the Editor
+    pub codegen_enabled: bool,
     /// OllamaのエンドポイントURL / Ollama endpoint URL
     pub ollama_url: String,
     /// Ollamaのビジョン対応モデル名 / Ollama vision-capable model name
@@ -67,6 +70,7 @@ impl Default for Settings {
             hotkey_region: DEFAULT_HOTKEY_REGION.into(),
             hotkey_window: DEFAULT_HOTKEY_WINDOW.into(),
             hotkey_fullscreen: DEFAULT_HOTKEY_FULLSCREEN.into(),
+            codegen_enabled: true,
             ollama_url: "http://127.0.0.1:11434".into(),
             ollama_model: "qwen2.5vl".into(),
             save_mode: "ask".into(),

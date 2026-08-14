@@ -1,5 +1,5 @@
 AuraCap - THIRD-PARTY LICENSE TEXTS
-Generated: 2026-08-01 (node scripts/gen_third_party_notices.mjs)
+Generated: 2026-08-14 (node scripts/gen_third_party_notices.mjs)
 
 このファイルは AuraCap に同梱されるオープンソースコンポーネントのライセンス本文を
 そのまま収録したものです。コンポーネントの一覧は THIRD-PARTY-NOTICES.md を参照してください。

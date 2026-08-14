@@ -14,6 +14,7 @@ type Settings = {
   hotkeyRegion: string;
   hotkeyWindow: string;
   hotkeyFullscreen: string;
+  codegenEnabled: boolean;
   ollamaUrl: string;
   ollamaModel: string;
   saveMode: string; // "ask" | "fixed" | "last"
@@ -29,6 +30,7 @@ const DEFAULT_SETTINGS: Settings = {
   hotkeyRegion: "PrintScreen",
   hotkeyWindow: "Ctrl+PrintScreen",
   hotkeyFullscreen: "Shift+PrintScreen",
+  codegenEnabled: true,
   ollamaUrl: "http://127.0.0.1:11434",
   ollamaModel: "qwen2.5vl",
   saveMode: "ask",
@@ -805,19 +807,49 @@ function Home() {
       {/* エンジンはOllama（完全ローカル）のみ。画像を外部APIへ送らない方針のため。
           Ollama is the only engine: the images never leave the machine. */}
       <section className="flex flex-col gap-2">
-        <span className="text-sm font-semibold">コード生成（Screenshot-to-Code）</span>
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold">AIによるコード生成（Screenshot-to-Code）</span>
+          <button
+            onClick={() => {
+              if (!settings) return;
+              if (!settings.codegenEnabled && !(settings.ollamaModel ?? "").trim()) {
+                setError("有効にする前にモデル名を入力してください");
+                return;
+              }
+              applySettings({ ...settings, codegenEnabled: !settings.codegenEnabled });
+            }}
+            role="switch"
+            aria-checked={settings?.codegenEnabled ?? false}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+              settings?.codegenEnabled ? "bg-[var(--accent)]" : "bg-zinc-700"
+            }`}
+          >
+            <span
+              className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-all ${
+                settings?.codegenEnabled ? "left-6" : "left-1"
+              }`}
+            />
+          </button>
+        </div>
         <p className="text-xs text-zinc-500">
-          ローカルのOllamaで処理します。画像がこのPCの外に出ることはありません。
+          ローカルのOllamaで処理します。画像がこのPCの外に出ることはありません。オフにするとEditorのボタンも非表示になります。
         </p>
 
         <div className="flex items-center gap-2">
-          <label className="w-16 shrink-0 text-xs text-zinc-400">モデル</label>
+          <label className="w-16 shrink-0 text-xs text-zinc-400">
+            モデル{settings?.codegenEnabled && <span className="text-red-400"> *</span>}
+          </label>
           {ollamaModels && ollamaModels.length > 0 ? (
             // 一覧取得成功 → ドロップダウン（選択で即保存） / Models loaded → dropdown (saves on change)
             <select
+              required={settings?.codegenEnabled ?? false}
               value={settings?.ollamaModel ?? ""}
               onChange={(e) => settings && applySettings({ ...settings, ollamaModel: e.target.value })}
-              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
+              className={`min-w-0 flex-1 rounded-lg border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:outline-none ${
+                settings?.codegenEnabled && !(settings?.ollamaModel ?? "").trim()
+                  ? "border-red-500"
+                  : "border-zinc-700 focus:border-[var(--accent)]"
+              }`}
             >
               {settings?.ollamaModel && !ollamaModels.includes(settings.ollamaModel) && (
                 <option value={settings.ollamaModel}>{settings.ollamaModel}（未インストール？）</option>
@@ -832,16 +864,25 @@ function Home() {
             // 一覧未取得（未起動等）→ 手入力にフォールバック / No list → manual entry
             <input
               type="text"
+              required={settings?.codegenEnabled ?? false}
               placeholder={loadingModels ? "モデル一覧を取得中…" : "モデル名（例: qwen2.5vl）"}
               value={draft?.ollamaModel ?? settings?.ollamaModel ?? ""}
               onChange={(e) => setDraft((d) => ({ ...d, ollamaModel: e.target.value }))}
               onBlur={async () => {
-                if (settings && draft?.ollamaModel !== undefined) {
-                  if (await applySettings({ ...settings, ollamaModel: (draft.ollamaModel ?? "").trim() }))
-                    setDraft((d) => ({ ...d, ollamaModel: undefined }));
+                if (!settings || draft?.ollamaModel === undefined) return;
+                const model = (draft.ollamaModel ?? "").trim();
+                if (settings.codegenEnabled && !model) {
+                  setError("コード生成が有効な間はモデル名が必須です");
+                  return;
                 }
+                if (await applySettings({ ...settings, ollamaModel: model }))
+                  setDraft((d) => ({ ...d, ollamaModel: undefined }));
               }}
-              className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-[var(--accent)] focus:outline-none"
+              className={`min-w-0 flex-1 rounded-lg border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none ${
+                settings?.codegenEnabled && !(draft?.ollamaModel ?? settings?.ollamaModel ?? "").trim()
+                  ? "border-red-500"
+                  : "border-zinc-700 focus:border-[var(--accent)]"
+              }`}
             />
           )}
         </div>

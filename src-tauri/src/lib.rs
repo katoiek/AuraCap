@@ -9,10 +9,10 @@ mod pin;
 mod settings;
 
 // 録画（Windows: WGC / macOS: ScreenCaptureKit）は両OSでネイティブ実装。
-// Smart Redact（WinRT OCR）はWindows専用API依存のため、macOSではフロント呼び出しを
+// テキスト抽出（WinRT OCR）はWindows専用API依存のため、macOSではフロント呼び出しを
 // 壊さない「未対応」スタブに差し替える。
 // Recording (Windows: WGC / macOS: ScreenCaptureKit) has a native implementation on both OSes.
-// Smart Redact (WinRT OCR) depends on Windows-only APIs; on macOS, swap in an "unsupported"
+// Text extraction (WinRT OCR) depends on Windows-only APIs; on macOS, swap in an "unsupported"
 // stub so frontend calls don't break.
 #[cfg(any(windows, target_os = "macos"))]
 mod recorder;
@@ -21,10 +21,10 @@ mod recorder;
 mod recorder;
 
 #[cfg(windows)]
-mod redact;
+mod ocr;
 #[cfg(not(windows))]
-#[path = "redact_stub.rs"]
-mod redact;
+#[path = "ocr_stub.rs"]
+mod ocr;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -426,8 +426,7 @@ pub fn run() {
             editor::export_copy,
             editor::export_save,
             editor::pick_save_dir,
-            redact::detect_sensitive,
-            redact::extract_text,
+            ocr::extract_text,
             pin::pin_image,
             pin::edit_pin,
             pin::pin_history,

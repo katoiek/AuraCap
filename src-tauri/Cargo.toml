@@ -1,6 +1,6 @@
 [package]
 name = "auracap"
-version = "1.0.0"
+version = "1.0.1"
 description = "AI-ready screen capture tool for Windows and macOS"
 authors = ["katoiek"]
 edition = "2021"
@@ -37,13 +37,11 @@ chrono = "0.4.45"
 # ブラウザ拡張からのフルページキャプチャ受信用（ローカルHTTPブリッジ）
 # Local HTTP bridge that receives full-page captures from the browser extension
 tiny_http = "0.12"
-# Smart Redactの機密パターン検出 / Sensitive-pattern matching for Smart Redact
-regex = "1"
 tauri-plugin-dialog = "2"
 # Ollamaとの通信をRust側で行う（WebViewのfetchはCORSで弾かれるため） / HTTP client for Ollama (WebView fetch is blocked by CORS)
 reqwest = { version = "0.12", features = ["json"] }
 
-# Windows専用（録画・Smart Redact・ウィンドウ列挙） / Windows-only (recording, Smart Redact, window enumeration)
+# Windows専用（録画・テキスト抽出・ウィンドウ列挙） / Windows-only (recording, text extraction, window enumeration)
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
@@ -52,7 +50,7 @@ windows = { version = "0.62.2", features = [
     # 録画：選択モニターをHMONITORで特定する / Recording: resolve the selected monitor via HMONITOR
     "Win32_Graphics_Gdi",
     "Win32_System_Threading",
-    # Smart Redact用（Windows標準OCR） / For Smart Redact (built-in Windows OCR)
+    # テキスト抽出用（Windows標準OCR） / For text extraction (built-in Windows OCR)
     "Win32_System_WinRT",
     "Media_Ocr",
     "Graphics_Imaging",

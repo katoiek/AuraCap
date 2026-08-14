@@ -50,8 +50,6 @@ function Editor() {
   const scale = zoom ?? fitScale;
   const [textEdit, setTextEdit] = useState<{ id: string | null; x: number; y: number; value: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  // Smart Redact実行中フラグ / Smart Redact in-flight flag
-  const [redacting, setRedacting] = useState(false);
   // Screenshot-to-Code: 生成中フラグと生成結果 / Codegen in-flight flag and result
   const [generating, setGenerating] = useState(false);
   // 結果モーダル（コード生成・テキスト抽出で共用） / Result modal (shared by codegen & text extraction)
@@ -60,6 +58,17 @@ function Editor() {
   // 生成経過秒数（ローカルLLMは数分かかるため進行が見えるように）
   // Elapsed seconds; local LLMs can take minutes, so show progress
   const [genElapsed, setGenElapsed] = useState(0);
+  // コード生成のON/OFF（メイン画面の設定。OFFならツールバーにボタンを出さない）
+  // Codegen on/off (set from the main window; OFF hides the toolbar button)
+  const [codegenEnabled, setCodegenEnabled] = useState(true);
+  const refreshCodegenEnabled = useCallback(() => {
+    invoke<{ codegenEnabled: boolean }>("get_settings")
+      .then((s) => setCodegenEnabled(s.codegenEnabled ?? true))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    refreshCodegenEnabled();
+  }, [refreshCodegenEnabled]);
   useEffect(() => {
     if (!generating) return;
     setGenElapsed(0);
@@ -101,6 +110,9 @@ function Editor() {
       resetAll();
       setImgSize(null);
       setVersion(Date.now());
+      // ウィンドウは使い回しのため、メイン画面での設定変更をここで拾い直す
+      // The window is reused, so pick up any setting change made in the main window here
+      refreshCodegenEnabled();
     });
     // 取りこぼし対策：マウント時点で編集対象が既にあれば自力で読み込む
     // （ウィンドウ生成直後のemitはJS読み込み前で届かないことがある）
@@ -130,7 +142,7 @@ function Editor() {
       unlistenEnd.then((f) => f());
       unlistenSaved.then((f) => f());
     };
-  }, [resetAll]);
+  }, [resetAll, refreshCodegenEnabled]);
 
   // 表示倍率：ビューポートに収まるようフィット / Fit-to-viewport display scale
   const recomputeScale = useCallback(() => {
@@ -298,32 +310,6 @@ function Editor() {
     }
   }, [renderToPng, showToast]);
 
-  // Smart Redact: ローカルOCRで機密領域を検出し、ぼかしオブジェクトとして追加する
-  // Smart Redact: detect sensitive regions with local OCR and add them as blur objects
-  const runRedact = useCallback(async () => {
-    if (redacting) return;
-    setRedacting(true);
-    try {
-      const regions = await invoke<{ x: number; y: number; w: number; h: number; kind: string }[]>(
-        "detect_sensitive",
-      );
-      if (regions.length === 0) {
-        showToast("機密らしき箇所は見つかりませんでした");
-      } else {
-        pushUndo();
-        setObjects((os) => [
-          ...os,
-          ...regions.map((r) => ({ id: nextId(), kind: "blur" as const, x: r.x, y: r.y, w: r.w, h: r.h })),
-        ]);
-        showToast(`${regions.length}件をぼかしました（不要なものは選択してDelete）`);
-      }
-    } catch (e) {
-      showToast(`検出に失敗しました: ${e}`);
-      invoke("frontend_log", { message: `detect_sensitive failed: ${e}` });
-    } finally {
-      setRedacting(false);
-    }
-  }, [redacting, pushUndo, showToast]);
 
   // Screenshot-to-Code: 編集後の画像から単一HTMLを生成する（ローカルOllamaのみ）
   // キャプチャ画像は機密を含みうるため、外部APIへは一切送らない方針。
@@ -736,13 +722,12 @@ function Editor() {
         onHighlightOpacity={chooseHighlightOpacity}
         textColor={textColor}
         onTextColor={chooseTextColor}
-        redacting={redacting}
-        onRedact={runRedact}
         extracting={extracting}
         onExtractText={runExtractText}
         generating={generating}
         genElapsed={genElapsed}
         onCodegen={runCodegen}
+        codegenEnabled={codegenEnabled}
         scale={scale}
         zoom={zoom}
         onZoomStep={stepZoom}

@@ -45,10 +45,9 @@ grep -c 'countdown=1' src/App.tsx
 | 軽量エディタ・履歴・付箋 | ✅ | ✅ |
 | 画面録画 | ✅ WGC | ✅ ScreenCaptureKit（**macOS 15+** が必要） |
 | コード生成（Ollama） | ✅ | ✅ |
-| 自動マスク（Smart Redact） | ✅ WinRT OCR | ❌ `redact_stub.rs` が「未対応」を返す |
-| テキスト抽出 | ✅ WinRT OCR | ❌ 同上 |
+| テキスト抽出 | ✅ WinRT OCR | ❌ `ocr_stub.rs` が「未対応」を返す |
 
-Smart Redact とテキスト抽出の macOS 対応は `Vision.framework`（`VNRecognizeTextRequest`）での置換が必要ですが、1.0 のスコープ外です。
+テキスト抽出の macOS 対応は `Vision.framework`（`VNRecognizeTextRequest`）での置換が必要ですが、1.0 のスコープ外です。
 
 ---
 
@@ -189,7 +188,7 @@ DevTools は各ウィンドウで `Cmd+Option+I`。ウィンドウごとに別�
 - [ ] `~/Pictures/AuraCap/History` へ自動保存＋クリップボードコピー
 - [ ] エディタの全ツール（矩形 / 矢印 / テキスト / ハイライト / ぼかし / バッジ / トリミング）
 - [ ] コード生成（Ollama 起動時）
-- [ ] 自動マスク・テキスト抽出が「未対応」のトーストを返し、クラッシュしない
+- [ ] テキスト抽出が「未対応」のトーストを返し、クラッシュしない
 - [ ] トレイ（メニューバー）アイコンとメニューが機能する
 
 ### ブラウザ拡張
@@ -274,4 +273,4 @@ CSP は `<meta>` タグではなく **HTTP レスポンスヘッダ**で配信�
 - **署名・公証が未対応。** Gatekeeper の警告を消すには Apple Developer Program（年 $99）の "Developer ID Application" 証明書での署名＋公証の両方が必要です。詳細と費用比較は [RELEASE.md](./RELEASE.md) の「コード署名」節
 - **動画録画は macOS 15 以降が必要。** `SCRecordingOutput`（`screencapturekit` の `macos_15_0` feature）に依存しています
 - **全画面録画にはカウントダウンが出ません。** 枠が存在しないためで、実装する場合はモニター矩形の取得に DPI 変換（macOS はポイント単位）の対応が必要です
-- **自動マスク・テキスト抽出は Windows 専用**（WinRT OCR 依存）
+- **テキスト抽出は Windows 専用**（WinRT OCR 依存）
