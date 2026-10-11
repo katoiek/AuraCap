@@ -28,6 +28,7 @@ use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandle
 #[cfg(windows)]
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
+    VideoSettingsSubType,
 };
 #[cfg(windows)]
 use windows_capture::frame::Frame;
@@ -73,6 +74,8 @@ pub struct RecordFlags {
     out_w: u32,
     out_h: u32,
     crop: Option<CropRect>,
+    // true=HEVC / false=H.264 / true = HEVC, false = H.264
+    hevc: bool,
 }
 
 /// WGCのフレームを受け取りエンコーダへ流すハンドラ / Receives WGC frames and feeds the encoder
@@ -97,8 +100,15 @@ impl GraphicsCaptureApiHandler for Recorder {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         let f = ctx.flags;
+        // コーデックは設定に従う（既定はWindows標準プレーヤーで再生できるH.264）
+        // Codec follows the setting (default H.264, playable in Windows' stock players)
+        let sub_type = if f.hevc {
+            VideoSettingsSubType::HEVC
+        } else {
+            VideoSettingsSubType::H264
+        };
         let encoder = VideoEncoder::new(
-            VideoSettingsBuilder::new(f.out_w, f.out_h),
+            VideoSettingsBuilder::new(f.out_w, f.out_h).sub_type(sub_type),
             AudioSettingsBuilder::default().disabled(true),
             ContainerSettingsBuilder::default(),
             &f.path,
@@ -243,11 +253,19 @@ fn begin_recording(app: &AppHandle, target: RecordTarget) -> Result<String, Stri
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let path = dir.join(format!("auracap_{stamp}.mp4"));
 
+    let hevc = app
+        .state::<crate::settings::SettingsState>()
+        .0
+        .lock()
+        .unwrap()
+        .video_codec
+        == "hevc";
     let flags = RecordFlags {
         path: path.to_string_lossy().to_string(),
         out_w,
         out_h,
         crop,
+        hevc,
     };
     let settings = Settings::new(
         monitor,

@@ -42,6 +42,9 @@ pub struct Settings {
     pub file_name_template: String,
     /// 手動保存の出力形式: "png" / "jpg" / "webp" / Output format for manual saves
     pub save_format: String,
+    /// 録画の動画コーデック（Windows）: "h264"（標準プレーヤーで再生可）/ "hevc"（高圧縮・要HEVC拡張機能）
+    /// Video codec for recordings (Windows): "h264" (plays in stock players) / "hevc" (smaller; needs the HEVC extension)
+    pub video_codec: String,
 }
 
 /// 既定のホットキー。MacキーボードにPrintScreenは無いため、macOSはCommand系の組み合わせにする
@@ -78,6 +81,7 @@ impl Default for Settings {
             last_save_dir: String::new(),
             file_name_template: "auracap_{date}_{time}".into(),
             save_format: "png".into(),
+            video_codec: "h264".into(),
         }
     }
 }

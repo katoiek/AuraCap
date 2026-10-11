@@ -1,6 +1,6 @@
 [package]
 name = "auracap"
-version = "1.0.1"
+version = "1.0.2"
 description = "AI-ready screen capture tool for Windows and macOS"
 authors = ["katoiek"]
 edition = "2021"
@@ -28,7 +28,11 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 # Windowsログオン時の自動起動（レジストリRunキー管理） / Auto-launch at login (registry Run key)
 tauri-plugin-autostart = "2"
-xcap = "0.9.6"
+# wgc: Windows Graphics Capture API を使う（既定のGDI BitBltだとGPUハードウェアアクセラレーション
+# された動画（YouTube等）が黒く写ることがあるための切り替え）。macOSではこのフラグは無視される。
+# wgc: use the Windows Graphics Capture API instead of the default GDI BitBlt, which renders
+# GPU-hardware-accelerated video (e.g. YouTube) as black. Ignored on macOS.
+xcap = { version = "0.9.6", features = ["wgc"] }
 # xcapの`image`依存はPNGのみ有効化されているため、フリーズフレーム表示用のBMPエンコードに必要な機能を明示的に追加
 # xcap's `image` dependency only enables PNG; explicitly add the feature needed for BMP-encoding the frozen frame
 image = { version = "0.25", default-features = false, features = ["bmp"] }

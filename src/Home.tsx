@@ -22,6 +22,7 @@ type Settings = {
   lastSaveDir: string;
   fileNameTemplate: string;
   saveFormat: string; // "png" | "jpg" | "webp"
+  videoCodec: string; // "h264" | "hevc"（録画のコーデック / recording codec）
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -38,6 +39,7 @@ const DEFAULT_SETTINGS: Settings = {
   lastSaveDir: "",
   fileNameTemplate: "auracap_{date}_{time}",
   saveFormat: "png",
+  videoCodec: "h264",
 };
 
 // テンプレートをプレビュー文字列に展開（バックエンドの build_file_name と同じ規則）
@@ -739,6 +741,22 @@ function Home() {
             <option value="webp">WebP（高圧縮）</option>
           </select>
         </div>
+
+        {/* 録画の動画形式 / Recording video codec */}
+        <div className="mt-1 flex items-center justify-between">
+          <span className="text-xs text-zinc-300">録画の動画形式</span>
+          <select
+            value={settings?.videoCodec ?? "h264"}
+            onChange={(e) => settings && applySettings({ ...settings, videoCodec: e.target.value })}
+            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200 focus:border-[var(--accent)] focus:outline-none"
+          >
+            <option value="h264">H.264（互換性重視）</option>
+            <option value="hevc">HEVC / H.265（高圧縮）</option>
+          </select>
+        </div>
+        <p className="text-xs text-zinc-500">
+          H.264はWindows標準のプレーヤーでそのまま再生できます。HEVCはファイルが小さくなりますが、再生に「HEVCビデオ拡張機能」が必要な場合があります。
+        </p>
       </section>
 
       <div className="h-px bg-white/10" />
