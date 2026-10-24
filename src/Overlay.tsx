@@ -81,6 +81,10 @@ function normalize(l: number, t: number, r: number, b: number): Rect {
 
 function Overlay({ monitorId }: { monitorId: number }) {
   const [info, setInfo] = useState<OverlayInfo | null>(null);
+  // 凍結フレームのURL（セッション毎に変えてキャッシュを避ける） / Frozen-frame URL (changes per session to dodge caching)
+  const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  // 計測用：セッション開始時刻 / Timing: when the session started (performance.now())
+  const t0 = useRef(0);
   const [phase, setPhase] = useState<Phase>("pick");
   const [rect, setRect] = useState<Rect | null>(null);
   const [hover, setHover] = useState<{ rect: Rect; title: string } | null>(null);
@@ -125,8 +129,8 @@ function Overlay({ monitorId }: { monitorId: number }) {
     setPhase("pick");
   }, []);
 
-  // 透明窓：背景を透過させ、下の実デスクトップを見せる（SnippingやNexusと同方式・高速）
-  // Transparent window: clear backgrounds so the live desktop shows through (fast, like Snipping/Nexus)
+  // 背景は透明のままにし、凍結フレーム(<img>)が全面を覆う（info未取得の一瞬だけ透ける）
+  // Keep backgrounds transparent; the frozen-frame <img> covers everything (only see-through before info loads)
   useEffect(() => {
     const html = document.documentElement;
     const body = document.body;
@@ -147,6 +151,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
   useEffect(() => {
     const win = getCurrentWebviewWindow();
     const load = () => {
+      t0.current = performance.now();
       // セッション毎に最新テーマを再適用（選択枠のアクセント色をテーマに合わせる）
       // Re-apply the current theme each session so the selection accent matches
       const t = localStorage.getItem("auracap_theme") || "graphite";
@@ -154,11 +159,11 @@ function Overlay({ monitorId }: { monitorId: number }) {
       return invoke<OverlayInfo | null>("get_overlay_info", { monitorId })
         .then((fresh) => {
           setInfo(fresh);
-          if (fresh) {
-            // 凍結画像を待たず、情報が揃った時点で即ウィンドウを表示する（透明窓＝最速）
-            // No frozen frame to wait for; show the window as soon as info is ready (transparent = fastest)
-            invoke("overlay_ready", { monitorId });
-          }
+          // 凍結フレームを背景に敷く。デコード完了後に<img>のonLoadでウィンドウを表示する
+          // Lay the frozen frame as the background; the window is shown from the <img>'s onLoad after decode
+          setFrameSrc(
+            fresh ? `${convertFileSrc(String(monitorId), "freeze")}?t=${Date.now()}` : null,
+          );
         })
         .catch((e) => invoke("frontend_log", { message: `get_overlay_info failed: ${e}` }));
     };
@@ -170,6 +175,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
     const unlistenEnd = win.listen("session-end", () => {
       resetState();
       setInfo(null);
+      setFrameSrc(null);
     });
     load(); // 生成直後にセッションが既に始まっている場合に備える / In case a session is already active
 
@@ -424,7 +430,7 @@ function Overlay({ monitorId }: { monitorId: number }) {
   };
 
   if (!info) {
-    // 透明のまま（凍結画像を待たない）/ Stay transparent (no frozen frame to wait for)
+    // セッション外は透明のまま / Stay transparent outside a session
     return <div className="h-screen w-screen" />;
   }
 
@@ -442,8 +448,41 @@ function Overlay({ monitorId }: { monitorId: number }) {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
-      {/* 暗転：全面を薄暗くし、選択部だけSVGマスクでくり抜く（下の重い画像が無いので軽い）
-          Dim: darken everything and cut out the selection via an SVG mask (light; no heavy image beneath) */}
+      {/* 凍結フレーム：実画面ではなく撮影済みの画像を背景に出す。保存される絵と見た目が一致し、
+          ハードウェア再生の動画（YouTube等）が透明窓越しにぼやける問題も出ない（Snipping Toolと同方式）
+          Frozen frame: show the already-captured image instead of the live desktop, so what you see
+          is what gets saved and hardware-decoded video (YouTube etc.) no longer blurs through the
+          transparent window (same approach as Snipping Tool) */}
+      {frameSrc && (
+        <img
+          src={frameSrc}
+          alt=""
+          draggable={false}
+          className="pointer-events-none absolute inset-0 h-full w-full select-none"
+          onLoad={(e) => {
+            const tLoad = performance.now() - t0.current;
+            // デコードまで終えてから表示すると白/透明のチラつきが出ない
+            // Show only after decoding so there's no white/transparent flash
+            e.currentTarget
+              .decode()
+              .catch(() => {})
+              .finally(() => {
+                invoke("frontend_log", {
+                  message: `[timing] overlay-${monitorId} img load ${Math.round(tLoad)}ms, +decode ${Math.round(performance.now() - t0.current)}ms (since session-start)`,
+                });
+                invoke("overlay_ready", { monitorId });
+              });
+          }}
+          onError={() => {
+            // 画像が出せなくても操作は続けられるようウィンドウは出す / Still show the window so selection works
+            invoke("frontend_log", { message: "freeze frame failed to load" });
+            invoke("overlay_ready", { monitorId });
+          }}
+        />
+      )}
+
+      {/* 暗転：全面を薄暗くし、選択部だけSVGマスクでくり抜く
+          Dim: darken everything and cut out the selection via an SVG mask */}
       <svg className="pointer-events-none absolute inset-0 h-full w-full">
         <defs>
           <mask id="selection-mask">

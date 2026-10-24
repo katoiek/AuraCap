@@ -3,7 +3,6 @@
 // ADR 0001: Capture all monitors first on hotkey press, then let the user select on the frozen image
 
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -14,7 +13,7 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use xcap::image::imageops;
-use xcap::image::{ImageFormat, RgbaImage};
+use xcap::image::RgbaImage;
 use xcap::Monitor;
 
 use crate::history;
@@ -72,13 +71,6 @@ pub struct Frame {
     pub bmp: Vec<u8>,
 }
 
-/// 1モニター分の撮影結果。並列スレッドから戻る生の組で、この後 Frame へ組み立てる。
-/// (モニターID, 物理原点x, 物理原点y, スケール, 撮影画像, 表示用BMP)
-/// One monitor's capture result: the raw tuple returned from the parallel threads,
-/// assembled into a Frame afterwards.
-/// (monitor id, physical origin x, physical origin y, scale, captured image, display BMP)
-type CapturedMonitor = (u32, i32, i32, f32, RgbaImage, Vec<u8>);
-
 /// アクティブなキャプチャセッション（空 = セッションなし）
 /// Active capture session (empty = no session)
 #[derive(Default)]
@@ -127,6 +119,105 @@ pub fn start_overlay_capture(app: &AppHandle, mode: CaptureMode) {
     });
 }
 
+/// 1モニター分のオーバーレイへセッション開始を通知する（なければ生成）。
+/// WebView2はメッセージポンプを持つスレッドでしか初期化できないため、メインスレッドで行う。
+/// Notify one monitor's resident overlay of the new session (create on demand if missing).
+/// WebView2 can only initialize on a thread with a message pump, hence the main thread.
+fn dispatch_overlay(app: &AppHandle, info: OverlayInfo, started: Instant) {
+    let app_handle = app.clone();
+    let result = app.run_on_main_thread(move || {
+        let label = format!("overlay-{}", info.monitor_id);
+        if app_handle.get_webview_window(&label).is_none() {
+            if let Err(e) = create_overlay_window(
+                &app_handle,
+                info.monitor_id,
+                info.x,
+                info.y,
+                info.width,
+                info.height,
+            ) {
+                eprintln!("[auracap] failed to create overlay window: {e}");
+                end_session(&app_handle);
+                return;
+            }
+        }
+        if let Some(window) = app_handle.get_webview_window(&label) {
+            // モニター構成変化に備えて位置・サイズを毎回合わせ直す（物理px）
+            // Re-sync position/size every session in case the monitor layout changed (physical px)
+            let _ = window.set_position(PhysicalPosition::new(info.x, info.y));
+            let _ = window.set_size(PhysicalSize::new(info.width, info.height));
+            // 影つき枠なしウィンドウは不可視枠のぶんクライアント領域が内側にずれる。
+            // 差分だけ外側へ動かし、描画領域をモニターへぴったり一致させる。
+            // 影自体は消さない：消すとDWMの高速合成が無効になり描画が極端に遅くなる。
+            // The shadow's invisible frame offsets the client area inward; shift the
+            // window outward by the measured delta so the client area matches the
+            // monitor exactly. The shadow itself stays on: removing it disables DWM's
+            // fast composition path and makes rendering extremely slow.
+            if let (Ok(outer), Ok(inner)) = (window.outer_position(), window.inner_position()) {
+                let (dx, dy) = (inner.x - outer.x, inner.y - outer.y);
+                if dx != 0 || dy != 0 {
+                    let _ = window.set_position(PhysicalPosition::new(info.x - dx, info.y - dy));
+                }
+            }
+            // 配置結果の診断 / Placement diagnostics
+            if let (Ok(pos), Ok(size)) = (window.inner_position(), window.inner_size()) {
+                eprintln!(
+                    "[auracap] overlay-{} client ({},{}) {}x{} (monitor ({},{}) {}x{} scale={})",
+                    info.monitor_id, pos.x, pos.y, size.width, size.height,
+                    info.x, info.y, info.width, info.height, info.scale
+                );
+            }
+        }
+        let _ = app_handle.emit_to(
+            EventTarget::labeled(&label),
+            "session-start",
+            info.monitor_id,
+        );
+        eprintln!(
+            "[auracap] overlay-{} dispatched in {}ms",
+            info.monitor_id,
+            Instant::now().duration_since(started).as_millis()
+        );
+    });
+    if let Err(e) = result {
+        eprintln!("[auracap] failed to dispatch overlay: {e}");
+    }
+}
+
+/// 表示用の無圧縮24bit・上から下(top-down)BMPを作る。32bit(RGBA)より転送量が約25%減り、
+/// 画像クレートの汎用エンコーダより速い。
+/// Build an uncompressed 24-bit top-down BMP for display: ~25% less data to ship than 32-bit
+/// RGBA, and faster than the generic image-crate encoder.
+fn encode_bmp_24(image: &RgbaImage) -> Vec<u8> {
+    const HEADER: usize = 54; // ファイルヘッダ14 + BITMAPINFOHEADER 40 / file header 14 + BITMAPINFOHEADER 40
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let stride = (w * 3 + 3) & !3; // 各行は4バイト境界 / rows are 4-byte aligned
+    let data_size = stride * h;
+    let mut out = vec![0u8; HEADER + data_size];
+    out[0..2].copy_from_slice(b"BM");
+    out[2..6].copy_from_slice(&((HEADER + data_size) as u32).to_le_bytes());
+    out[10..14].copy_from_slice(&(HEADER as u32).to_le_bytes()); // 画素データの開始位置 / pixel data offset
+    out[14..18].copy_from_slice(&40u32.to_le_bytes()); // DIBヘッダのサイズ / DIB header size
+    out[18..22].copy_from_slice(&(w as i32).to_le_bytes());
+    out[22..26].copy_from_slice(&(-(h as i32)).to_le_bytes()); // 負の高さ＝上から下 / negative height = top-down
+    out[26..28].copy_from_slice(&1u16.to_le_bytes()); // プレーン数 / planes
+    out[28..30].copy_from_slice(&24u16.to_le_bytes()); // ビット深度 / bits per pixel
+    out[34..38].copy_from_slice(&(data_size as u32).to_le_bytes());
+    for (src_row, dst_row) in image
+        .as_raw()
+        .chunks_exact(w * 4)
+        .zip(out[HEADER..].chunks_exact_mut(stride))
+    {
+        for (px, dst) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(3)) {
+            // RGBA -> BGR
+            dst[0] = px[2];
+            dst[1] = px[1];
+            dst[2] = px[0];
+        }
+    }
+    out
+}
+
 fn begin_session(app: &AppHandle, mode: CaptureMode) -> Result<(), AnyError> {
     let state = app.state::<SessionState>();
     if !state.0.lock().unwrap().is_empty() {
@@ -143,138 +234,91 @@ fn begin_session(app: &AppHandle, mode: CaptureMode) -> Result<(), AnyError> {
         Vec::new()
     };
 
-    // 全モニターを並列に撮影・エンコードする。xcapのMonitorはスレッド間で送れない
-    // （Send境界がない）ため、各スレッドがIDで自分のモニターを引き直す。
-    // Capture & encode all monitors in parallel. xcap's Monitor is not Send,
-    // so each thread re-resolves its own monitor by ID.
-    let monitor_ids: Vec<u32> = Monitor::all()?
+    // 全モニターを並列に撮影・エンコードし、撮れたモニターから順に即オーバーレイを出す
+    // （全モニターの完了を待たない）。xcapのMonitorはスレッド間で送れない（Send境界がない）ため、
+    // 各スレッドがIDで自分のモニターを引き直す。なおxcapのWGC撮影は内部ロックで実質直列なので、
+    // カーソルのあるモニターを先頭に並べ、いま使っている画面が最初に出るようにする。
+    // Capture & encode all monitors in parallel and show each overlay as soon as ITS frame is
+    // ready (no waiting for the others). xcap's Monitor is not Send, so each thread re-resolves
+    // its own monitor by ID. xcap's WGC capture is effectively serialized by an internal lock,
+    // so the monitor under the cursor goes first to make the screen in use appear first.
+    let mut monitor_ids: Vec<u32> = Monitor::all()?
         .iter()
         .filter_map(|m| m.id().ok())
         .collect();
-    let captured: Vec<Result<CapturedMonitor, String>> =
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = monitor_ids
-                .into_iter()
-                .map(|id| {
-                    scope.spawn(move || -> Result<_, String> {
-                        let monitor = Monitor::all()
-                            .map_err(|e| e.to_string())?
-                            .into_iter()
-                            .find(|m| m.id().is_ok_and(|mid| mid == id))
-                            .ok_or_else(|| format!("monitor {id} disappeared"))?;
-                        let t = Instant::now();
-                        let image = monitor.capture_image().map_err(|e| e.to_string())?;
-                        let capture_ms = t.elapsed().as_millis();
-                        let t = Instant::now();
-                        // 表示用は無圧縮BMP：PNG圧縮を避けて高速化 / Uncompressed BMP avoids PNG cost
-                        let mut bmp =
-                            Vec::with_capacity((image.width() * image.height() * 4 + 64) as usize);
-                        image
-                            .write_to(&mut Cursor::new(&mut bmp), ImageFormat::Bmp)
-                            .map_err(|e| e.to_string())?;
-                        eprintln!(
-                            "[auracap] monitor {id}: capture {capture_ms}ms, bmp encode {}ms",
-                            t.elapsed().as_millis()
-                        );
-                        let scale = monitor.scale_factor().map_err(|e| e.to_string())?;
-                        let (mon_x, mon_y) = to_physical_origin(
-                            monitor.x().map_err(|e| e.to_string())?,
-                            monitor.y().map_err(|e| e.to_string())?,
-                            scale,
-                        );
-                        Ok((id, mon_x, mon_y, scale, image, bmp))
-                    })
+    if let Some(cursor_id) = cursor_pos()
+        .ok()
+        .and_then(|(cx, cy)| Monitor::from_point(cx, cy).ok())
+        .and_then(|m| m.id().ok())
+    {
+        if let Some(i) = monitor_ids.iter().position(|&id| id == cursor_id) {
+            monitor_ids.swap(0, i);
+        }
+    }
+    let desktop_windows = &desktop_windows;
+    let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = monitor_ids
+            .into_iter()
+            .map(|id| {
+                scope.spawn(move || -> Result<(), String> {
+                    let monitor = Monitor::all()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|m| m.id().is_ok_and(|mid| mid == id))
+                        .ok_or_else(|| format!("monitor {id} disappeared"))?;
+                    let t = Instant::now();
+                    let image = monitor.capture_image().map_err(|e| e.to_string())?;
+                    let capture_ms = t.elapsed().as_millis();
+                    let t = Instant::now();
+                    // 表示用は無圧縮BMP：PNG圧縮を避けて高速化 / Uncompressed BMP avoids PNG cost
+                    let bmp = encode_bmp_24(&image);
+                    eprintln!(
+                        "[auracap] monitor {id}: capture {capture_ms}ms, bmp encode {}ms",
+                        t.elapsed().as_millis()
+                    );
+                    let scale = monitor.scale_factor().map_err(|e| e.to_string())?;
+                    let (mon_x, mon_y) = to_physical_origin(
+                        monitor.x().map_err(|e| e.to_string())?,
+                        monitor.y().map_err(|e| e.to_string())?,
+                        scale,
+                    );
+                    // ウィンドウ候補をモニターローカル座標へ変換 / Convert candidates to monitor-local coords
+                    let windows: Vec<PickableWindow> = desktop_windows
+                        .iter()
+                        .map(|w| PickableWindow {
+                            title: w.title.clone(),
+                            x: w.x - mon_x,
+                            y: w.y - mon_y,
+                            width: w.width,
+                            height: w.height,
+                        })
+                        .collect();
+                    let info = OverlayInfo {
+                        monitor_id: id,
+                        x: mon_x,
+                        y: mon_y,
+                        // 物理ピクセルはキャプチャ画像の実寸から取る / Physical pixels come from the captured image itself
+                        width: image.width(),
+                        height: image.height(),
+                        scale,
+                        mode: mode.as_str().to_string(),
+                        windows,
+                    };
+                    app.state::<SessionState>()
+                        .0
+                        .lock()
+                        .unwrap()
+                        .insert(id, Frame { info: info.clone(), image, bmp });
+                    dispatch_overlay(app, info, started);
+                    Ok(())
                 })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-
-    let mut frames: HashMap<u32, Frame> = HashMap::new();
-    for item in captured {
-        let (id, mon_x, mon_y, scale, image, bmp) = item?;
-        // ウィンドウ候補をモニターローカル座標へ変換 / Convert candidates to monitor-local coords
-        let windows: Vec<PickableWindow> = desktop_windows
-            .iter()
-            .map(|w| PickableWindow {
-                title: w.title.clone(),
-                x: w.x - mon_x,
-                y: w.y - mon_y,
-                width: w.width,
-                height: w.height,
             })
             .collect();
-        let info = OverlayInfo {
-            monitor_id: id,
-            x: mon_x,
-            y: mon_y,
-            // 物理ピクセルはキャプチャ画像の実寸から取る / Physical pixels come from the captured image itself
-            width: image.width(),
-            height: image.height(),
-            scale,
-            mode: mode.as_str().to_string(),
-            windows,
-        };
-        frames.insert(id, Frame { info, image, bmp });
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for r in results {
+        r?;
     }
-
-    let infos: Vec<OverlayInfo> = frames.values().map(|f| f.info.clone()).collect();
-    *state.0.lock().unwrap() = frames;
-
-    // 常駐オーバーレイへセッション開始を通知（なければ生成）。
-    // WebView2はメッセージポンプを持つスレッドでしか初期化できないため、メインスレッドで行う。
-    // Notify resident overlays of the new session (create on demand if missing).
-    // WebView2 can only initialize on a thread with a message pump, hence the main thread.
-    let app_handle = app.clone();
-    app.run_on_main_thread(move || {
-        for info in infos {
-            let label = format!("overlay-{}", info.monitor_id);
-            if app_handle.get_webview_window(&label).is_none() {
-                if let Err(e) =
-                    create_overlay_window(&app_handle, info.monitor_id, info.x, info.y, info.width, info.height)
-                {
-                    eprintln!("[auracap] failed to create overlay window: {e}");
-                    end_session(&app_handle);
-                    return;
-                }
-            }
-            if let Some(window) = app_handle.get_webview_window(&label) {
-                // モニター構成変化に備えて位置・サイズを毎回合わせ直す（物理px）
-                // Re-sync position/size every session in case the monitor layout changed (physical px)
-                let _ = window.set_position(PhysicalPosition::new(info.x, info.y));
-                let _ = window.set_size(PhysicalSize::new(info.width, info.height));
-                // 影つき枠なしウィンドウは不可視枠のぶんクライアント領域が内側にずれる。
-                // 差分だけ外側へ動かし、描画領域をモニターへぴったり一致させる。
-                // 影自体は消さない：消すとDWMの高速合成が無効になり描画が極端に遅くなる。
-                // The shadow's invisible frame offsets the client area inward; shift the
-                // window outward by the measured delta so the client area matches the
-                // monitor exactly. The shadow itself stays on: removing it disables DWM's
-                // fast composition path and makes rendering extremely slow.
-                if let (Ok(outer), Ok(inner)) = (window.outer_position(), window.inner_position()) {
-                    let (dx, dy) = (inner.x - outer.x, inner.y - outer.y);
-                    if dx != 0 || dy != 0 {
-                        let _ = window.set_position(PhysicalPosition::new(info.x - dx, info.y - dy));
-                    }
-                }
-                // 配置結果の診断 / Placement diagnostics
-                if let (Ok(pos), Ok(size)) = (window.inner_position(), window.inner_size()) {
-                    eprintln!(
-                        "[auracap] overlay-{} client ({},{}) {}x{} (monitor ({},{}) {}x{} scale={})",
-                        info.monitor_id, pos.x, pos.y, size.width, size.height,
-                        info.x, info.y, info.width, info.height, info.scale
-                    );
-                }
-            }
-            let _ = app_handle.emit_to(
-                EventTarget::labeled(&label),
-                "session-start",
-                info.monitor_id,
-            );
-        }
-        eprintln!(
-            "[auracap] session dispatched in {}ms",
-            Instant::now().duration_since(started).as_millis()
-        );
-    })?;
 
     // 万一フロントが応答しなくても詰まないよう、2.5秒後に強制表示する保険
     // Safety net: force-show overlays after 2.5s if the frontend never reports ready
