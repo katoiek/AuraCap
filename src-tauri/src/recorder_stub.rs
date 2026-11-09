@@ -69,3 +69,10 @@ pub fn get_pending_recording(_app: AppHandle) -> Option<String> {
 
 #[tauri::command]
 pub fn close_video_editor(_app: AppHandle) {}
+
+/// 録画未対応のためカウントダウンは存在しない / No countdown exists since recording is unsupported
+pub fn countdown_active() -> bool {
+    false
+}
+
+pub fn cancel_countdown() {}

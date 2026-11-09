@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import History from "./History";
+import { COLORS } from "./editor/model";
 
 // メインウィンドウ：キャプチャボタンが主役。設定（⚙）でホットキー・コード生成を構成する
 // Main window: capture buttons are primary. The ⚙ settings view configures hotkeys & codegen.
@@ -23,6 +24,10 @@ type Settings = {
   fileNameTemplate: string;
   saveFormat: string; // "png" | "jpg" | "webp"
   videoCodec: string; // "h264" | "hevc"（録画のコーデック / recording codec）
+  // エディタの既定色（#rrggbb）/ Editor default colors (#rrggbb)
+  defaultShapeColor: string;
+  defaultTextBgColor: string;
+  defaultTextColor: string;
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -40,7 +45,57 @@ const DEFAULT_SETTINGS: Settings = {
   fileNameTemplate: "auracap_{date}_{time}",
   saveFormat: "png",
   videoCodec: "h264",
+  defaultShapeColor: "#fbbf24",
+  defaultTextBgColor: "#fbbf24",
+  defaultTextColor: "#ffffff",
 };
+
+// 色の選択行（プリセット＋自由色）。picker=falseなら自由色は出さない
+// A color-choice row (presets + custom color); picker=false hides the custom color input
+function ColorSetting(p: {
+  label: string;
+  value: string;
+  options: string[];
+  picker?: boolean;
+  onChange: (c: string) => void;
+}) {
+  const isPreset = p.options.some((c) => c.toLowerCase() === p.value.toLowerCase());
+  return (
+    <div className="flex items-center justify-between rounded-lg bg-zinc-800 px-3 py-2">
+      <span className="text-xs text-zinc-300">{p.label}</span>
+      <div className="flex items-center gap-1.5">
+        {p.options.map((c) => (
+          <button
+            key={c}
+            title={c}
+            onClick={() => p.onChange(c)}
+            className={`h-5 w-5 rounded-full border-2 ${
+              p.value.toLowerCase() === c.toLowerCase() ? "border-white" : "border-zinc-600"
+            }`}
+            style={{ backgroundColor: c }}
+          />
+        ))}
+        {p.picker !== false && (
+          <label
+            title="自由な色を選ぶ"
+            className={`relative grid h-5 w-5 cursor-pointer place-items-center overflow-hidden rounded-full border-2 ${
+              isPreset ? "border-zinc-600" : "border-white"
+            }`}
+            style={{ backgroundColor: isPreset ? "transparent" : p.value }}
+          >
+            {isPreset && <span className="text-[9px] leading-none">🎨</span>}
+            <input
+              type="color"
+              value={p.value}
+              onChange={(e) => p.onChange(e.target.value)}
+              className="absolute inset-0 cursor-pointer opacity-0"
+            />
+          </label>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // テンプレートをプレビュー文字列に展開（バックエンドの build_file_name と同じ規則）
 // Expand a template into a preview string (mirrors the backend build_file_name rules)
@@ -757,6 +812,35 @@ function Home() {
         <p className="text-xs text-zinc-500">
           H.264はWindows標準のプレーヤーでそのまま再生できます。HEVCはファイルが小さくなりますが、再生に「HEVCビデオ拡張機能」が必要な場合があります。
         </p>
+      </section>
+
+      <div className="h-px bg-white/10" />
+
+      {/* エディタの既定色 / Editor default colors */}
+      <section className="flex flex-col gap-1.5">
+        <span className="text-sm font-semibold">エディタの既定色</span>
+        <p className="text-xs text-zinc-500">
+          エディタで新しく描く図形・テキストの最初の色です。次回のキャプチャから反映されます。
+        </p>
+        <ColorSetting
+          label="図形（枠・矢印・ハイライト・バッジ）"
+          value={settings?.defaultShapeColor ?? DEFAULT_SETTINGS.defaultShapeColor}
+          options={COLORS}
+          onChange={(c) => settings && applySettings({ ...settings, defaultShapeColor: c })}
+        />
+        <ColorSetting
+          label="テキストの背景"
+          value={settings?.defaultTextBgColor ?? DEFAULT_SETTINGS.defaultTextBgColor}
+          options={COLORS}
+          onChange={(c) => settings && applySettings({ ...settings, defaultTextBgColor: c })}
+        />
+        <ColorSetting
+          label="テキストの文字"
+          value={settings?.defaultTextColor ?? DEFAULT_SETTINGS.defaultTextColor}
+          options={["#ffffff", "#000000"]}
+          picker={false}
+          onChange={(c) => settings && applySettings({ ...settings, defaultTextColor: c })}
+        />
       </section>
 
       <div className="h-px bg-white/10" />

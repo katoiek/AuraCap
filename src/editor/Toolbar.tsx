@@ -1,9 +1,10 @@
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ToolIcon from "./ToolIcon";
-import { COLORS, STROKE_PRESETS, TOOLS, type Obj, type Tool } from "./model";
+import { COLORS, SIZE_MUL_MAX, SIZE_MUL_MIN, STROKE_PRESETS, TEXT_FONTS, TOOLS, fontFamilyOf, type FontId, type Obj, type Tool } from "./model";
 
 // エディタのツールバー。状態は一切持たず、親から受け取った値と操作を並べるだけの表示層。
-// 状態を持たせないのは、取り消し（undo）や選択の一貫性を親が一箇所で管理しているため。
+// 編集データの状態を持たせないのは、取り消し（undo）や選択の一貫性を親が一箇所で管理しているため（詳細行の開閉だけは例外）。
 // The editor toolbar: a presentation layer with no state of its own — it renders the values and
 // actions handed down by the parent, which owns undo and selection consistency in one place.
 
@@ -23,6 +24,12 @@ export type ToolbarProps = {
   onHighlightOpacity: (opacity: number) => void;
   textColor: string;
   onTextColor: (color: string) => void;
+  textFont: FontId;
+  onTextFont: (font: FontId) => void;
+  textSizeMul: number;
+  onTextSizeStep: (dir: 1 | -1) => void;
+  badgeSizeMul: number;
+  onBadgeSizeStep: (dir: 1 | -1) => void;
   extracting: boolean;
   onExtractText: () => void;
   generating: boolean;
@@ -38,6 +45,32 @@ export type ToolbarProps = {
   onSave: () => void;
 };
 
+// サイズ倍率の−/＋ステッパー（1クリック=1回の取り消し単位） / Size-multiplier −/+ stepper (one click = one undo step)
+function SizeStepper(p: { label: string; value: number; onStep: (dir: 1 | -1) => void }) {
+  return (
+    <div className="flex items-center gap-1 rounded-lg bg-zinc-800 px-2 py-1 text-xs text-zinc-300">
+      <span className="mr-0.5">{p.label}</span>
+      <button
+        onClick={() => p.onStep(-1)}
+        disabled={p.value <= SIZE_MUL_MIN}
+        title="小さく"
+        className="grid h-6 w-6 place-items-center rounded bg-zinc-700 text-sm hover:bg-zinc-600 disabled:opacity-40"
+      >
+        −
+      </button>
+      <span className="w-10 text-center font-mono">{Math.round(p.value * 100)}%</span>
+      <button
+        onClick={() => p.onStep(1)}
+        disabled={p.value >= SIZE_MUL_MAX}
+        title="大きく"
+        className="grid h-6 w-6 place-items-center rounded bg-zinc-700 text-sm hover:bg-zinc-600 disabled:opacity-40"
+      >
+        ＋
+      </button>
+    </div>
+  );
+}
+
 function Toolbar(p: ToolbarProps) {
   // ハイライト・テキストの詳細設定は「そのツールを使用中」か「その種類を選択中」のときだけ出す
   // Per-tool controls appear only while that tool is active or an object of that kind is selected
@@ -47,8 +80,16 @@ function Toolbar(p: ToolbarProps) {
     p.selectedObj?.kind === "highlight" ? p.selectedObj.opacity : p.highlightOpacity;
   const activeTextColor =
     p.selectedObj?.kind === "text" ? p.selectedObj.textColor : p.textColor;
+  const activeFont = p.selectedObj?.kind === "text" ? p.selectedObj.font : p.textFont;
+  const activeTextSize = p.selectedObj?.kind === "text" ? p.selectedObj.sizeMul : p.textSizeMul;
+  const showBadgeSize = p.tool === "badge" || p.selectedObj?.kind === "badge";
+  const hasDetails = showOpacity || showTextColor || showBadgeSize;
+  // 詳細行の開閉（見た目だけの状態なのでここで持つ） / Open state of the detail row (view-only, so kept here)
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  const activeBadgeSize = p.selectedObj?.kind === "badge" ? p.selectedObj.sizeMul : p.badgeSizeMul;
 
   return (
+    <div>
     <header
       ref={p.toolbarRef}
       className="flex items-center gap-1 overflow-x-auto border-b border-zinc-800 px-2 py-1.5 [&>*]:shrink-0"
@@ -120,40 +161,18 @@ function Toolbar(p: ToolbarProps) {
       >
         🧪
       </button>
-      {showOpacity && (
-        <label
-          className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300"
-          title="ハイライトの不透明度"
+      {/* 詳細設定（不透明度・文字色・フォント・サイズ）の開閉。該当ツール/選択があるときだけ出す */}
+      {/* Toggle for the detail row (opacity / text color / font / size); shown only when relevant */}
+      {hasDetails && (
+        <button
+          onClick={() => setDetailsOpen((v) => !v)}
+          title={detailsOpen ? "詳細設定を閉じる" : "詳細設定を開く"}
+          className={`rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+            detailsOpen ? "bg-zinc-700 text-[var(--accent)]" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+          }`}
         >
-          <span>不透明度</span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(opacity * 100)}
-            onChange={(e) => p.onHighlightOpacity(Number(e.target.value) / 100)}
-            className="w-20 accent-[var(--accent)]"
-          />
-          <span className="w-8 text-right font-mono">{Math.round(opacity * 100)}%</span>
-        </label>
-      )}
-      {/* テキストの文字色（白/黒）。カラースウォッチは背景色として使う */}
-      {/* Text font color (white/black); the color swatches act as the background */}
-      {showTextColor && (
-        <div className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300">
-          <span>文字色</span>
-          {["#ffffff", "#000000"].map((c) => (
-            <button
-              key={c}
-              title={c === "#ffffff" ? "白文字" : "黒文字"}
-              onClick={() => p.onTextColor(c)}
-              className={`h-6 w-6 rounded-full border-2 ${
-                activeTextColor === c ? "border-[var(--accent)]" : "border-zinc-600"
-              }`}
-              style={{ backgroundColor: c }}
-            />
-          ))}
-        </div>
+          詳細 {detailsOpen ? "▴" : "▾"}
+        </button>
       )}
       <div className="mx-2 h-6 w-px bg-zinc-700" />
       {/* テキスト抽出（ローカルOCR） / Text extraction (local OCR) */}
@@ -232,6 +251,74 @@ function Toolbar(p: ToolbarProps) {
         </button>
       </div>
     </header>
+    {/* 詳細設定の行。折り返して横スクロールが出ないようにする / Detail row; wraps so no horizontal scrollbar appears */}
+    {hasDetails && detailsOpen && (
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-2 py-1.5">
+      {showOpacity && (
+        <label
+          className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300"
+          title="ハイライトの不透明度"
+        >
+          <span>不透明度</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(opacity * 100)}
+            onChange={(e) => p.onHighlightOpacity(Number(e.target.value) / 100)}
+            className="w-20 accent-[var(--accent)]"
+          />
+          <span className="w-8 text-right font-mono">{Math.round(opacity * 100)}%</span>
+        </label>
+      )}
+      {/* テキストの文字色（白/黒）。カラースウォッチは背景色として使う */}
+      {/* Text font color (white/black); the color swatches act as the background */}
+      {showTextColor && (
+        <div className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300">
+          <span>文字色</span>
+          {["#ffffff", "#000000"].map((c) => (
+            <button
+              key={c}
+              title={c === "#ffffff" ? "白文字" : "黒文字"}
+              onClick={() => p.onTextColor(c)}
+              className={`h-6 w-6 rounded-full border-2 ${
+                activeTextColor === c ? "border-[var(--accent)]" : "border-zinc-600"
+              }`}
+              style={{ backgroundColor: c }}
+            />
+          ))}
+        </div>
+      )}
+      {/* テキストのフォントとサイズ / Text font and size */}
+      {showTextColor && (
+        <>
+          <label className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300">
+            <span>フォント</span>
+            <select
+              value={activeFont}
+              onChange={(e) => p.onTextFont(e.target.value as FontId)}
+              className="rounded bg-zinc-700 px-1 py-0.5 text-zinc-100 outline-none"
+              style={{ fontFamily: fontFamilyOf(activeFont) }}
+            >
+              {TEXT_FONTS.map((f) => (
+                <option key={f.id} value={f.id} style={{ fontFamily: f.family }}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <SizeStepper
+            label="文字サイズ"
+            value={activeTextSize}
+            onStep={p.onTextSizeStep}
+          />
+        </>
+      )}
+      {/* 番号バッジのサイズ / Badge size */}
+      {showBadgeSize && <SizeStepper label="バッジサイズ" value={activeBadgeSize} onStep={p.onBadgeSizeStep} />}
+      </div>
+    )}
+    </div>
   );
 }
 

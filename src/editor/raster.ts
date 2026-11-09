@@ -8,7 +8,9 @@ import {
   badgeTextColor,
   measureTextLines,
   textBubbleMetrics,
-  TEXT_FONT,
+  badgeRadius,
+  fontFamilyOf,
+  textFontSize,
   type Metrics,
   type Obj,
   type RectShape,
@@ -83,14 +85,15 @@ function drawObject(
       break;
     case "text": {
       const lines = o.text.split("\n");
-      const { width, height, ascent, lineHeight } = measureTextLines(lines, m.fontSize);
-      const { padding, radius } = textBubbleMetrics(m.fontSize);
+      const fontSize = textFontSize(m, o.sizeMul);
+      const { width, height, ascent, lineHeight } = measureTextLines(lines, fontSize, o.font);
+      const { padding, radius } = textBubbleMetrics(fontSize);
       ctx.save();
       ctx.fillStyle = o.color;
       ctx.beginPath();
       ctx.roundRect(o.x - padding, o.y - padding, width + padding * 2, height + padding * 2, radius);
       ctx.fill();
-      ctx.font = `bold ${m.fontSize}px ${TEXT_FONT}`;
+      ctx.font = `bold ${fontSize}px ${fontFamilyOf(o.font)}`;
       ctx.textBaseline = "alphabetic";
       ctx.fillStyle = o.textColor;
       lines.forEach((line, i) => {
@@ -99,19 +102,21 @@ function drawObject(
       ctx.restore();
       break;
     }
-    case "badge":
+    case "badge": {
+      const r = badgeRadius(m, o.sizeMul);
       ctx.save();
       ctx.fillStyle = o.color;
       ctx.beginPath();
-      ctx.arc(o.x, o.y, m.badgeR, 0, Math.PI * 2);
+      ctx.arc(o.x, o.y, r, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = badgeTextColor(o.color);
-      ctx.font = `bold ${Math.round(m.badgeR * 1.1)}px "Segoe UI", sans-serif`;
+      ctx.font = `bold ${Math.round(r * 1.1)}px "Segoe UI", sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(String(o.n), o.x, o.y + m.badgeR * 0.05);
+      ctx.fillText(String(o.n), o.x, o.y + r * 0.05);
       ctx.restore();
       break;
+    }
   }
 }
 

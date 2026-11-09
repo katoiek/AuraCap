@@ -13,10 +13,10 @@ export type Obj =
   | ({ id: string; kind: "highlight"; color: string; opacity: number } & RectShape)
   | ({ id: string; kind: "blur" } & RectShape)
   | { id: string; kind: "arrow"; x1: number; y1: number; x2: number; y2: number; color: string }
-  // color = 背景色（角丸の吹き出し）、textColor = 文字色（白/黒）
-  // color = background (rounded pill), textColor = font color (white/black)
-  | { id: string; kind: "text"; x: number; y: number; text: string; color: string; textColor: string }
-  | { id: string; kind: "badge"; x: number; y: number; n: number; color: string };
+  // color = 背景色（角丸の吹き出し）、textColor = 文字色（白/黒）、font = フォント、sizeMul = 基準サイズへの倍率
+  // color = background (rounded pill), textColor = font color (white/black), font = typeface, sizeMul = multiplier on the base size
+  | { id: string; kind: "text"; x: number; y: number; text: string; color: string; textColor: string; font: FontId; sizeMul: number }
+  | { id: string; kind: "badge"; x: number; y: number; n: number; color: string; sizeMul: number };
 
 export type Gesture =
   | { kind: "draw"; tool: Tool; ax: number; ay: number; id: string }
@@ -50,7 +50,34 @@ export const STROKE_PRESETS: { label: string; mul: number; title: string }[] = [
   { label: "太", mul: 1.7, title: "線を太く" },
 ];
 
-export const TEXT_FONT = '"Yu Gothic UI", "Segoe UI", sans-serif';
+// フォントのプリセット。Windows/macOS両方の代表的な日本語フォントを並べ、最後に汎用ファミリーで受ける
+// Font presets: representative Japanese fonts for both Windows and macOS, ending in a generic family fallback
+export type FontId = "gothic" | "udgothic" | "mincho" | "kyokasho" | "mono";
+
+export const TEXT_FONTS: { id: FontId; label: string; family: string }[] = [
+  { id: "gothic", label: "ゴシック", family: '"Yu Gothic UI", "Hiragino Sans", "Segoe UI", sans-serif' },
+  { id: "udgothic", label: "UDゴシック", family: '"BIZ UDPGothic", "Hiragino Maru Gothic ProN", "Yu Gothic UI", sans-serif' },
+  { id: "mincho", label: "明朝", family: '"Yu Mincho", "Hiragino Mincho ProN", "MS PMincho", serif' },
+  { id: "kyokasho", label: "教科書体", family: '"UD Digi Kyokasho NP-B", "UD Digi Kyokasho N-B", "Kyokasho ICA", "Hiragino Maru Gothic ProN", "Yu Gothic UI", sans-serif' },
+  { id: "mono", label: "等幅", family: '"BIZ UDGothic", Consolas, Menlo, "Yu Gothic UI", monospace' },
+];
+
+export const DEFAULT_FONT: FontId = "gothic";
+
+export const fontFamilyOf = (id: FontId) => (TEXT_FONTS.find((f) => f.id === id) ?? TEXT_FONTS[0]).family;
+
+// サイズ倍率（基準サイズに掛ける）。範囲と刻み / Size multiplier (applied to the base size): range & step
+export const SIZE_MUL_MIN = 0.5;
+export const SIZE_MUL_MAX = 4;
+export const SIZE_MUL_STEP = 0.1;
+// 既定の倍率（新規作成時）。基準サイズだと大きすぎるため70% / Default multiplier for new objects (base size felt too big, so 70%)
+export const DEFAULT_SIZE_MUL = 0.7;
+export const clampSizeMul = (v: number) =>
+  Math.round(Math.min(SIZE_MUL_MAX, Math.max(SIZE_MUL_MIN, v)) * 10) / 10;
+
+// オブジェクト個別のフォントサイズ・バッジ半径 / Per-object font size and badge radius
+export const textFontSize = (m: Metrics, sizeMul: number) => Math.max(8, Math.round(m.fontSize * sizeMul));
+export const badgeRadius = (m: Metrics, sizeMul: number) => Math.max(6, Math.round(m.badgeR * sizeMul));
 
 // バッジの数字色：白バッジでは黒、それ以外は白 / Badge digit color: black on white badges, white otherwise
 export const badgeTextColor = (bg: string) => (bg.toLowerCase() === "#ffffff" ? "#18181b" : "#ffffff");
@@ -92,6 +119,7 @@ let measureCtx: CanvasRenderingContext2D | null = null;
 export function measureTextLines(
   lines: string[],
   fontSize: number,
+  font: FontId,
 ): { width: number; height: number; ascent: number; lineHeight: number } {
   const fallbackAscent = fontSize * 0.8;
   const fallbackDescent = fontSize * 0.25;
@@ -101,7 +129,7 @@ export function measureTextLines(
     const lineHeight = (fallbackAscent + fallbackDescent) * 1.15;
     return { width: fontSize, height: lines.length * lineHeight, ascent: fallbackAscent, lineHeight };
   }
-  ctx.font = `bold ${fontSize}px ${TEXT_FONT}`;
+  ctx.font = `bold ${fontSize}px ${fontFamilyOf(font)}`;
   const width = Math.max(...lines.map((l) => ctx.measureText(l || " ").width), 1);
   // 行の内容（降下文字の有無等）で行送りがばらつかないよう、固定の参照文字列で測る
   // Measure a fixed reference string so line spacing doesn't jitter based on descenders etc.

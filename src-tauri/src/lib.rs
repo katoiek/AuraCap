@@ -381,6 +381,14 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
+                    // 録画カウントダウン中のEscは中止として扱う（登録はカウントダウン中だけ）
+                    // Esc during the recording countdown means cancel (registered only while it runs)
+                    if recorder::countdown_active()
+                        && "Escape".parse::<Shortcut>().is_ok_and(|s| s == *shortcut)
+                    {
+                        recorder::cancel_countdown();
+                        return;
+                    }
                     // 設定された文字列と突き合わせて該当モードを起動する
                     // Match against the configured hotkey strings
                     let current = app.state::<settings::SettingsState>().0.lock().unwrap().clone();

@@ -7,14 +7,21 @@ import Toolbar from "./editor/Toolbar";
 import { rasterize } from "./editor/raster";
 import {
   arrowHead,
+  badgeRadius,
   badgeTextColor,
+  clampSizeMul,
   COLORS,
   computeMetrics,
+  DEFAULT_FONT,
+  DEFAULT_SIZE_MUL,
+  fontFamilyOf,
   measureTextLines,
   nextId,
   normRect,
+  SIZE_MUL_STEP,
   textBubbleMetrics,
-  TEXT_FONT,
+  textFontSize,
+  type FontId,
   type Gesture,
   type Obj,
   type RectShape,
@@ -35,9 +42,17 @@ function Editor() {
   const [crop, setCrop] = useState<RectShape | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
-  const [color, setColor] = useState(COLORS[0]);
+  // 図形の色とテキスト背景の色は別々に持つ（既定色は設定画面で変更可）
+  // Shapes and text backgrounds keep separate colors (defaults come from the settings screen)
+  const [shapeColor, setShapeColor] = useState(COLORS[0]);
+  const [textBg, setTextBg] = useState(COLORS[0]);
   // テキスト吹き出しの文字色（白/黒の2択） / Text-bubble font color (white or black only)
   const [textColor, setTextColor] = useState("#ffffff");
+  // テキストのフォントとサイズ倍率、バッジのサイズ倍率。新規作成時の既定値で、選択中があればそのオブジェクトにも反映
+  // Text font & size multiplier, and badge size multiplier: defaults for new objects; also applied to the selected one
+  const [textFont, setTextFont] = useState<FontId>(DEFAULT_FONT);
+  const [textSizeMul, setTextSizeMul] = useState(DEFAULT_SIZE_MUL);
+  const [badgeSizeMul, setBadgeSizeMul] = useState(DEFAULT_SIZE_MUL);
   // 線幅の倍率（細0.6 / 中1.0 / 太1.7）。基準線幅に掛けて全体へ反映
   // Line-width multiplier (thin/medium/thick); multiplied into the base stroke globally
   const [strokeMul, setStrokeMul] = useState(1);
@@ -61,14 +76,27 @@ function Editor() {
   // コード生成のON/OFF（メイン画面の設定。OFFならツールバーにボタンを出さない）
   // Codegen on/off (set from the main window; OFF hides the toolbar button)
   const [codegenEnabled, setCodegenEnabled] = useState(true);
-  const refreshCodegenEnabled = useCallback(() => {
-    invoke<{ codegenEnabled: boolean }>("get_settings")
-      .then((s) => setCodegenEnabled(s.codegenEnabled ?? true))
+  // 設定の読み直し：コード生成のON/OFFと、エディタの既定色（#rrggbbのみ受け付ける）
+  // Reload settings: codegen on/off and the editor default colors (only #rrggbb accepted)
+  const refreshSettings = useCallback(() => {
+    const hex = /^#[0-9a-fA-F]{6}$/;
+    invoke<{
+      codegenEnabled: boolean;
+      defaultShapeColor?: string;
+      defaultTextBgColor?: string;
+      defaultTextColor?: string;
+    }>("get_settings")
+      .then((s) => {
+        setCodegenEnabled(s.codegenEnabled ?? true);
+        if (s.defaultShapeColor && hex.test(s.defaultShapeColor)) setShapeColor(s.defaultShapeColor);
+        if (s.defaultTextBgColor && hex.test(s.defaultTextBgColor)) setTextBg(s.defaultTextBgColor);
+        if (s.defaultTextColor && hex.test(s.defaultTextColor)) setTextColor(s.defaultTextColor);
+      })
       .catch(() => {});
   }, []);
   useEffect(() => {
-    refreshCodegenEnabled();
-  }, [refreshCodegenEnabled]);
+    refreshSettings();
+  }, [refreshSettings]);
   useEffect(() => {
     if (!generating) return;
     setGenElapsed(0);
@@ -89,7 +117,7 @@ function Editor() {
 
   // アノテーションの基準サイズ（画像サイズに比例） / Annotation base sizes proportional to the image
   const metrics = computeMetrics(imgSize?.w ?? null, strokeMul);
-  const { stroke, fontSize, badgeR, blurPx } = metrics;
+  const { stroke, blurPx } = metrics;
 
   const resetAll = useCallback(() => {
     setObjects([]);
@@ -112,7 +140,7 @@ function Editor() {
       setVersion(Date.now());
       // ウィンドウは使い回しのため、メイン画面での設定変更をここで拾い直す
       // The window is reused, so pick up any setting change made in the main window here
-      refreshCodegenEnabled();
+      refreshSettings();
     });
     // 取りこぼし対策：マウント時点で編集対象が既にあれば自力で読み込む
     // （ウィンドウ生成直後のemitはJS読み込み前で届かないことがある）
@@ -142,7 +170,7 @@ function Editor() {
       unlistenEnd.then((f) => f());
       unlistenSaved.then((f) => f());
     };
-  }, [resetAll, refreshCodegenEnabled]);
+  }, [resetAll, refreshSettings]);
 
   // 表示倍率：ビューポートに収まるようフィット / Fit-to-viewport display scale
   const recomputeScale = useCallback(() => {
@@ -257,7 +285,7 @@ function Editor() {
     },
     // metricsは毎レンダー新しいオブジェクトになるため、依存には中身の値を並べる
     // metrics is a fresh object each render, so depend on its values rather than the object
-    [objects, crop, imgSize, stroke, fontSize, badgeR, blurPx], // eslint-disable-line react-hooks/exhaustive-deps
+    [objects, crop, imgSize, stroke, metrics.fontSize, metrics.badgeR, blurPx], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const showToast = useCallback((message: string, ms = 1800) => {
@@ -445,11 +473,14 @@ function Editor() {
         );
       } else if (value) {
         pushUndo();
-        setObjects((os) => [...os, { id: nextId(), kind: "text", x: te.x, y: te.y, text: value, color, textColor }]);
+        setObjects((os) => [
+          ...os,
+          { id: nextId(), kind: "text", x: te.x, y: te.y, text: value, color: textBg, textColor, font: textFont, sizeMul: textSizeMul },
+        ]);
       }
       return null;
     });
-  }, [color, textColor, pushUndo]);
+  }, [textBg, textColor, textFont, textSizeMul, pushUndo]);
 
   const onStagePointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || !imgSize) return;
@@ -475,7 +506,14 @@ function Editor() {
     if (tool === "text") {
       e.preventDefault();
       setSelected(null);
-      setTextEdit({ id: null, x: p.x, y: p.y, value: "" });
+      // 既存のテキストを押したときは新規作成ではなく再編集にする
+      // Pressing an existing text re-edits it instead of creating a new one
+      const existing = objects.find((o) => o.id === objId);
+      if (existing?.kind === "text") {
+        setTextEdit({ id: existing.id, x: existing.x, y: existing.y, value: existing.text });
+      } else {
+        setTextEdit({ id: null, x: p.x, y: p.y, value: "" });
+      }
       return;
     }
 
@@ -519,7 +557,7 @@ function Editor() {
     if (tool === "badge") {
       pushUndo();
       const n = objects.reduce((m, o) => (o.kind === "badge" ? Math.max(m, o.n) : m), 0) + 1;
-      setObjects((os) => [...os, { id: nextId(), kind: "badge", x: p.x, y: p.y, n, color }]);
+      setObjects((os) => [...os, { id: nextId(), kind: "badge", x: p.x, y: p.y, n, color: shapeColor, sizeMul: badgeSizeMul }]);
       return;
     }
     if (tool === "crop") {
@@ -533,7 +571,7 @@ function Editor() {
       const id = nextId();
       gesture.current = { kind: "draw", tool, ax: p.x, ay: p.y, id };
       if (tool === "arrow") {
-        setObjects((os) => [...os, { id, kind: "arrow", x1: p.x, y1: p.y, x2: p.x, y2: p.y, color }]);
+        setObjects((os) => [...os, { id, kind: "arrow", x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: shapeColor }]);
       } else {
         const base = { id, x: p.x, y: p.y, w: 0, h: 0 } as const;
         setObjects((os) => [
@@ -541,8 +579,8 @@ function Editor() {
           tool === "blur"
             ? { ...base, kind: "blur" }
             : tool === "highlight"
-              ? { ...base, kind: "highlight", color, opacity: highlightOpacity }
-              : { ...base, kind: tool, color },
+              ? { ...base, kind: "highlight", color: shapeColor, opacity: highlightOpacity }
+              : { ...base, kind: tool, color: shapeColor },
         ]);
       }
       setSelected(id);
@@ -631,8 +669,14 @@ function Editor() {
 
   const onDoubleClick = (e: React.MouseEvent) => {
     // テキストのダブルクリックで再編集 / Double-click a text object to re-edit
-    const objId = (e.target as SVGElement).dataset.obj;
-    const obj = objects.find((o) => o.id === objId);
+    // pointerdownでSVGにポインタを捕捉しているため、dblclickのtargetはSVG自身になる。
+    // そこで要素ではなく座標から当たり判定する
+    // The SVG captures the pointer on pointerdown, so dblclick's target is the SVG itself;
+    // hit-test by coordinates instead of trusting e.target
+    const hit = document
+      .elementsFromPoint(e.clientX, e.clientY)
+      .find((n) => (n as SVGElement).dataset?.obj !== undefined) as SVGElement | undefined;
+    const obj = objects.find((o) => o.id === hit?.dataset.obj);
     if (obj?.kind === "text") {
       setTextEdit({ id: obj.id, x: obj.x, y: obj.y, value: obj.text });
       setSelected(null);
@@ -652,8 +696,13 @@ function Editor() {
 
   // 色を選ぶ。選択中オブジェクトがあればその色も変更する
   // Pick a color; also recolor the selected object if any
+  // テキスト系（テキストツール／テキスト選択中）はテキスト背景色、それ以外は図形色を扱う
+  // Text context (text tool / a text selected) edits the text background color; otherwise the shape color
+  const textCtx = tool === "text" || selectedObj?.kind === "text";
+  const activeColor = selectedObj && "color" in selectedObj ? selectedObj.color : textCtx ? textBg : shapeColor;
   const chooseColor = (c: string) => {
-    setColor(c);
+    if (textCtx) setTextBg(c);
+    else setShapeColor(c);
     if (selected) {
       pushUndo();
       setObjects((os) => os.map((o) => (o.id === selected && "color" in o ? { ...o, color: c } : o)));
@@ -679,6 +728,42 @@ function Editor() {
     if (selected) {
       pushUndo();
       setObjects((os) => os.map((o) => (o.id === selected && o.kind === "text" ? { ...o, textColor: v } : o)));
+    }
+  };
+
+  // テキストのフォントを選ぶ。選択中のテキストがあればそのフォントも変更する
+  // Pick the text font; also update the selected text's font if any
+  const chooseTextFont = (v: FontId) => {
+    setTextFont(v);
+    if (selected) {
+      pushUndo();
+      setObjects((os) => os.map((o) => (o.id === selected && o.kind === "text" ? { ...o, font: v } : o)));
+    }
+  };
+
+  // テキストのサイズ倍率を変える（選択中のテキストを基準に±刻み）。選択中のテキストがあればそのサイズも変更する
+  // Step the text size multiplier (relative to the selected text if any); also resizes the selected text
+  const stepTextSize = (dir: 1 | -1) => {
+    const cur = selectedObj?.kind === "text" ? selectedObj.sizeMul : textSizeMul;
+    const v = clampSizeMul(cur + dir * SIZE_MUL_STEP);
+    if (v === cur) return;
+    setTextSizeMul(v);
+    if (selected && selectedObj?.kind === "text") {
+      pushUndo();
+      setObjects((os) => os.map((o) => (o.id === selected && o.kind === "text" ? { ...o, sizeMul: v } : o)));
+    }
+  };
+
+  // バッジのサイズ倍率を変える。テキストと同様に選択中のバッジも変更する
+  // Step the badge size multiplier; also resizes the selected badge, like text
+  const stepBadgeSize = (dir: 1 | -1) => {
+    const cur = selectedObj?.kind === "badge" ? selectedObj.sizeMul : badgeSizeMul;
+    const v = clampSizeMul(cur + dir * SIZE_MUL_STEP);
+    if (v === cur) return;
+    setBadgeSizeMul(v);
+    if (selected && selectedObj?.kind === "badge") {
+      pushUndo();
+      setObjects((os) => os.map((o) => (o.id === selected && o.kind === "badge" ? { ...o, sizeMul: v } : o)));
     }
   };
 
@@ -714,7 +799,7 @@ function Editor() {
         }}
         strokeMul={strokeMul}
         onStrokeMul={setStrokeMul}
-        color={color}
+        color={activeColor}
         onColor={chooseColor}
         onEyeDropper={pickWithEyeDropper}
         selectedObj={selectedObj}
@@ -722,6 +807,12 @@ function Editor() {
         onHighlightOpacity={chooseHighlightOpacity}
         textColor={textColor}
         onTextColor={chooseTextColor}
+        textFont={textFont}
+        onTextFont={chooseTextFont}
+        textSizeMul={textSizeMul}
+        onTextSizeStep={stepTextSize}
+        badgeSizeMul={badgeSizeMul}
+        onBadgeSizeStep={stepBadgeSize}
         extracting={extracting}
         onExtractText={runExtractText}
         generating={generating}
@@ -791,6 +882,7 @@ function Editor() {
                 onDoubleClick={onDoubleClick}
               >
                 {objects.map((o) => {
+                  if (textEdit?.id === o.id) return null; // 編集中はtextareaが代わりに表示 / textarea stands in while editing
                   const sel = o.id === selected;
                   const common = {
                     "data-obj": o.id,
@@ -821,7 +913,8 @@ function Editor() {
                   }
                   if (o.kind === "text") {
                     const lines = o.text.split("\n");
-                    const { width, height, ascent, lineHeight } = measureTextLines(lines, fontSize);
+                    const fontSize = textFontSize(metrics, o.sizeMul);
+                    const { width, height, ascent, lineHeight } = measureTextLines(lines, fontSize, o.font);
                     const { padding, radius } = textBubbleMetrics(fontSize);
                     return (
                       <g key={o.id}>
@@ -846,7 +939,7 @@ function Editor() {
                           fill={o.textColor}
                           fontSize={fontSize}
                           fontWeight="bold"
-                          fontFamily={TEXT_FONT}
+                          fontFamily={fontFamilyOf(o.font)}
                         >
                           {lines.map((line, i) => (
                             // SVGのヒットテストは親<text>ではなく子<tspan>を対象にすることがあるため
@@ -861,15 +954,17 @@ function Editor() {
                       </g>
                     );
                   }
-                  if (o.kind === "badge")
+                  if (o.kind === "badge") {
+                    const badgeR = badgeRadius(metrics, o.sizeMul);
                     return (
                       <g key={o.id} {...common}>
                         <circle data-obj={o.id} cx={o.x} cy={o.y} r={badgeR} fill={o.color} />
-                        <text data-obj={o.id} x={o.x} y={o.y} fill={badgeTextColor(o.color)} fontSize={badgeR * 1.1} fontWeight="bold" textAnchor="middle" dominantBaseline="central" fontFamily='"Segoe UI", sans-serif'>
+                        <text data-obj={o.id} x={o.x} y={o.y} fill={badgeTextColor(o.color)} fontSize={Math.round(badgeR * 1.1)} fontWeight="bold" textAnchor="middle" dominantBaseline="central" fontFamily='"Segoe UI", sans-serif'>
                           {o.n}
                         </text>
                       </g>
                     );
+                  }
                   return null;
                 })}
 
@@ -929,7 +1024,12 @@ function Editor() {
               </svg>
 
               {/* テキスト入力 / Inline text input */}
-              {textEdit && (
+              {textEdit && (() => {
+                const editing = textEdit.id ? objects.find((o) => o.id === textEdit.id) : null;
+                const edit = editing?.kind === "text" ? editing : null;
+                const fontSize = textFontSize(metrics, edit ? edit.sizeMul : textSizeMul);
+                const font = edit ? edit.font : textFont;
+                return (
                 <textarea
                   autoFocus
                   value={textEdit.value}
@@ -948,8 +1048,10 @@ function Editor() {
                     left: textEdit.x * scale - textBubbleMetrics(fontSize).padding * scale,
                     top: textEdit.y * scale - textBubbleMetrics(fontSize).padding * scale,
                     minWidth: 160,
-                    backgroundColor: color,
-                    color: textColor,
+                    backgroundColor: edit ? edit.color : textBg,
+                    color: edit ? edit.textColor : textColor,
+                    fontFamily: fontFamilyOf(font),
+                    fontWeight: "bold",
                     borderRadius: textBubbleMetrics(fontSize).radius * scale,
                     padding: textBubbleMetrics(fontSize).padding * scale,
                     fontSize: Math.max(12, fontSize * scale),
@@ -958,11 +1060,12 @@ function Editor() {
                     // Match the SVG's ascent-based line spacing so the box doesn't visibly
                     // jump by a few px when the text commits (default line-height half-leading
                     // would otherwise add a mismatched gap above the first line)
-                    lineHeight: `${measureTextLines(textEdit.value.split("\n"), fontSize).lineHeight * scale}px`,
+                    lineHeight: `${measureTextLines(textEdit.value.split("\n"), fontSize, font).lineHeight * scale}px`,
                   }}
                   rows={Math.max(1, textEdit.value.split("\n").length)}
                 />
-              )}
+                );
+              })()}
             </>
           )}
         </div>

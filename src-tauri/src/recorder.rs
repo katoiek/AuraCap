@@ -8,6 +8,7 @@
 // shared, OS-independent code.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 #[cfg(windows)]
 use std::time::Instant;
@@ -631,26 +633,87 @@ fn hide_countdown(app: &AppHandle) {
     });
 }
 
-/// 録画開始までの残り秒数を枠の中央に出す。呼び出しから戻るまでちょうど `secs` 秒かかる。
+/// カウントダウン中か / Whether a countdown is running
+static COUNTDOWN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// カウントダウンの中止要求（Esc）/ Cancel request for the countdown (Esc)
+static COUNTDOWN_CANCELED: AtomicBool = AtomicBool::new(false);
+
+/// カウントダウン中ならtrue。グローバルショートカットのハンドラがEscの扱いを決めるのに使う
+/// True while a countdown runs; the global-shortcut handler uses it to decide what Esc means
+pub fn countdown_active() -> bool {
+    COUNTDOWN_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// カウントダウンの中止を要求する（待機側が50ms以内に気づいて畳む）
+/// Request cancellation (the waiting side notices within ~50ms and tears down)
+pub fn cancel_countdown() {
+    if COUNTDOWN_ACTIVE.load(Ordering::SeqCst) {
+        COUNTDOWN_CANCELED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 中止要求を監視しながら待つ。中止されたらtrueを返す
+/// Wait while watching for a cancel request; returns true if canceled
+fn wait_cancellable(total: Duration) -> bool {
+    let end = std::time::Instant::now() + total;
+    loop {
+        if COUNTDOWN_CANCELED.load(Ordering::SeqCst) {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if now >= end {
+            return false;
+        }
+        std::thread::sleep((end - now).min(Duration::from_millis(50)));
+    }
+}
+
+/// 録画開始までの残り秒数を出して待つ。呼び出しから戻るまでちょうど `secs` 秒かかる（中止時を除く）。
+/// `rect` があればその中央にカウントダウン窓を出す。Escで中止でき、中止ならfalseを返す。
 /// 秒の刻みはフロント側のタイマーに任せ、ここでは開始の合図を1回送るだけにする
 /// （毎秒emitする方式だと、1つでも取りこぼすと表示がそこで止まってしまうため）。
-/// Show the remaining seconds at the center of the frame; returns after exactly `secs` seconds.
+/// Show the remaining seconds and wait; takes exactly `secs` seconds unless canceled.
+/// With a `rect` the countdown badge goes at its center. Esc cancels and returns false.
 /// The per-second ticking is left to a timer in the frontend and only a single start signal is
 /// sent — emitting every second means one dropped event freezes the display.
-fn run_countdown(app: &AppHandle, rect: (i32, i32, u32, u32), secs: u32) {
-    show_countdown(app, rect);
-    let _ = app.emit_to(
-        EventTarget::labeled(COUNTDOWN_LABEL),
-        "countdown-start",
-        secs,
-    );
+fn run_countdown(app: &AppHandle, rect: Option<(i32, i32, u32, u32)>, secs: u32) -> bool {
+    COUNTDOWN_CANCELED.store(false, Ordering::SeqCst);
+    COUNTDOWN_ACTIVE.store(true, Ordering::SeqCst);
+    // Escはカウントダウン中だけ全体で掴む（窓はクリック透過・非フォーカスでキーが届かないため）
+    // Grab Esc globally only during the countdown (the badge is click-through and unfocused, so it gets no keys)
+    if let Err(e) = app.global_shortcut().register("Escape") {
+        eprintln!("[auracap] could not register Esc for countdown cancel: {e}");
+    }
+    if let Some(rect) = rect {
+        show_countdown(app, rect);
+        let _ = app.emit_to(
+            EventTarget::labeled(COUNTDOWN_LABEL),
+            "countdown-start",
+            secs,
+        );
+    }
     // 窓を畳んで合成から消えるまでの猶予を待ち時間の内側で消化する。
     // こうすると待ち時間の合計は secs のままで、かつ数字が録画に写り込まない。
     // Spend the hide-settle grace inside the wait: the total stays exactly `secs` while
     // guaranteeing the digit has left the screen before capture starts.
-    std::thread::sleep(Duration::from_millis(secs as u64 * 1000 - HIDE_SETTLE_MS));
+    let mut canceled = wait_cancellable(Duration::from_millis(
+        (secs as u64 * 1000).saturating_sub(HIDE_SETTLE_MS),
+    ));
     hide_countdown(app);
-    std::thread::sleep(Duration::from_millis(HIDE_SETTLE_MS));
+    if !canceled {
+        canceled = wait_cancellable(Duration::from_millis(HIDE_SETTLE_MS));
+    }
+    let _ = app.global_shortcut().unregister("Escape");
+    COUNTDOWN_ACTIVE.store(false, Ordering::SeqCst);
+    !canceled
+}
+
+/// プライマリモニターの矩形（物理px）。全画面録画のカウントダウン位置に使う
+/// The primary monitor's rect (physical px); used to place the countdown for fullscreen recording
+fn primary_monitor_rect(app: &AppHandle) -> Option<(i32, i32, u32, u32)> {
+    let m = app.primary_monitor().ok().flatten()?;
+    let (p, s) = (m.position(), m.size());
+    Some((p.x, p.y, s.width, s.height))
 }
 
 /// 遅延後に録画を開始する（別スレッド）。停止できるよう開始後にメイン窓を表示する。
@@ -673,9 +736,18 @@ fn start_delayed(app: &AppHandle, target: RecordTarget, delay_secs: u32) {
     let app = app.clone();
     std::thread::spawn(move || {
         if delay_secs > 0 {
-            match framed {
-                Some(rect) => run_countdown(&app, rect, delay_secs),
-                None => std::thread::sleep(Duration::from_secs(delay_secs as u64)),
+            // 全画面は枠が無いので、プライマリモニターの中央にカウントダウンを出す
+            // Fullscreen has no frame, so show the countdown at the center of the primary monitor
+            let rect = framed.or_else(|| primary_monitor_rect(&app));
+            if !run_countdown(&app, rect, delay_secs) {
+                // Escで中止：先に出した枠を畳み、隠していたメイン窓を戻す
+                // Canceled with Esc: take down the frame and bring back the main window
+                eprintln!("[auracap] recording canceled during countdown");
+                if framed.is_some() {
+                    hide_rec_frame(&app);
+                }
+                crate::show_main_window(&app);
+                return;
             }
         }
         match begin_recording(&app, target) {

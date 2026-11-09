@@ -706,12 +706,23 @@ pub fn start_capture(app: AppHandle, mode: String, delay: Option<u32>) {
 pub fn start_video(app: AppHandle, mode: String, delay: Option<u32>) {
     let delay = delay.unwrap_or(3);
     eprintln!("[auracap] start_video mode={mode} delay={delay}");
-    set_intent(&app, Some(delay));
+    // 動画意図は領域選択（確定時にtake_intentで消費）のためのもの。全画面は選択が無く
+    // 消費されないので立てない（残ると、次のホットキー撮影が動画扱いになってしまう）
+    // The video intent is for region selection (consumed via take_intent on confirm). Fullscreen has
+    // no selection to consume it, so don't set it (a leftover would turn the next hotkey capture into a video)
+    set_intent(&app, if mode == "fullscreen" { None } else { Some(delay) });
     match mode.as_str() {
         // 選択中は遅延を入れない（選んだ後にdelay秒待つ）/ No pre-delay during selection
         "region" => trigger_capture(app, "region".into(), 0),
         "window" => trigger_capture(app, "window".into(), 0),
-        "fullscreen" => crate::recorder::start_fullscreen_recording(&app, delay),
+        "fullscreen" => {
+            // メイン窓が録画に写らないよう隠す（開始後、またはEsc中止時に戻る）
+            // Hide the main window so it isn't recorded (it returns after start, or on Esc cancel)
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.hide();
+            }
+            crate::recorder::start_fullscreen_recording(&app, delay)
+        }
         other => eprintln!("[auracap] unknown video mode: {other}"),
     }
 }

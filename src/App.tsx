@@ -34,6 +34,32 @@ function RecFrame() {
 // here; the backend only sends a single start signal. The colors deliberately don't follow the
 // theme — an opaque dark disc with white digits stays readable over any content — and the accent
 // color is used only for the ring.
+const COUNTDOWN_FONT = '"Segoe UI", system-ui, sans-serif';
+
+// 数字の「インク（実際に描かれる範囲）」の中心を、行ボックスの中心へ合わせるための補正量（em単位）。
+// フォントの行ボックス（ascent/descent）と数字の字形は中心が一致しないため、そのまま中央寄せすると
+// 数字が下や左右へずれて見える。canvasで実測して打ち消す。
+// Correction (in em) that moves the digit's ink center onto the line box's center. A font's line box
+// (ascent/descent) and its digit glyphs don't share a center, so plain centering looks off; measure
+// with canvas and cancel the difference.
+let inkCtx: CanvasRenderingContext2D | null = null;
+function inkOffset(text: string): { x: number; y: number } {
+  if (!inkCtx) inkCtx = document.createElement("canvas").getContext("2d");
+  const ctx = inkCtx;
+  if (!ctx || !text) return { x: 0, y: 0 };
+  const px = 100;
+  ctx.font = `700 ${px}px ${COUNTDOWN_FONT}`;
+  const m = ctx.measureText(text);
+  // 古い環境でfontBoundingBox*が無ければ縦の補正は諦める / Skip the vertical fix if fontBoundingBox* is unavailable
+  const fa = m.fontBoundingBoxAscent;
+  const fd = m.fontBoundingBoxDescent;
+  const y = fa === undefined || fd === undefined
+    ? 0
+    : -((fa - fd) - (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent)) / 2 / px;
+  const x = -((m.actualBoundingBoxRight - m.actualBoundingBoxLeft) - m.width) / 2 / px;
+  return { x, y };
+}
+
 function Countdown() {
   const [remaining, setRemaining] = useState<number | null>(null);
   useEffect(() => {
@@ -72,6 +98,8 @@ function Countdown() {
     };
   }, []);
 
+  const off = inkOffset(remaining === null ? "" : String(remaining));
+
   return (
     <div
       style={{
@@ -85,14 +113,33 @@ function Countdown() {
         // An inset shadow draws the ring without affecting the box size
         boxShadow: "inset 0 0 0 max(3px, 3vmin) var(--accent)",
         color: "#ffffff",
-        fontFamily: '"Segoe UI", system-ui, sans-serif',
+        fontFamily: COUNTDOWN_FONT,
         fontWeight: 700,
-        fontVariantNumeric: "tabular-nums",
         fontSize: "50vmin",
         lineHeight: 1,
+        position: "relative",
       }}
     >
-      {remaining ?? ""}
+      {/* 数字ごとにインク中心を実測して補正する（tabular-numsは使わず、各桁を個別に中央へ） */}
+      {/* Correct per digit by measured ink center (no tabular-nums; each value is centered on its own) */}
+      <span style={{ display: "block", transform: `translate(${off.x}em, ${off.y}em)` }}>
+        {remaining ?? ""}
+      </span>
+      {/* 中止の案内。数字の下に小さく添える / Small cancel hint under the digit */}
+      {remaining !== null && (
+        <span
+          style={{
+            position: "absolute",
+            bottom: "16%",
+            fontSize: "9vmin",
+            fontWeight: 600,
+            opacity: 0.75,
+            letterSpacing: "0.05em",
+          }}
+        >
+          Esc で中止
+        </span>
+      )}
     </div>
   );
 }
