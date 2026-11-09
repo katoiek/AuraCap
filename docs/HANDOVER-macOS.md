@@ -1,8 +1,10 @@
 # macOS 引き継ぎ / macOS Handover
 
-> **対象**: `main` = タグ `v1.0.0`（コミット `90a36d1`）
-> **目的**: 1.0 の macOS 版をビルドし、Windows 側で検証できなかった項目を実機で確認して、既存の GitHub Release に追加する。
-> **最終更新**: 2026-08-02 / 直前の作業環境: Windows 11
+> **対象**: `main` = タグ `v1.0.4`（コミット `6d39945`）
+> **目的**: 1.0.4 の macOS 版をビルドし、Windows 側で検証できなかった項目を実機で確認して、GitHub Release `v1.0.4` に追加する。
+> **最終更新**: 2026-11-09 / 直前の作業環境: Windows 11
+>
+> Target: `main` = tag `v1.0.4` (commit `6d39945`). Goal: build the macOS app, verify on a real Mac what could not be checked on Windows, and attach the DMG to the `v1.0.4` GitHub Release.
 
 ---
 
@@ -14,11 +16,13 @@ Mac 側のワーキングコピーが古いと「ドキュメントにある機�
 
 ```sh
 git checkout main && git pull origin main
-git log --oneline -3          # 8db7b9d が先頭にあること
+git log --oneline -3          # 6d39945 が先頭にあること
 
-# 録画カウントダウン機能が入っているかの確認（すべて 1 以上が返れば OK）
+# 録画カウントダウン機能（Esc中止・全画面対応込み）が入っているかの確認（すべて 1 以上が返れば OK）
 grep -c reccountdown src-tauri/src/recorder.rs src-tauri/capabilities/default.json
 grep -c 'countdown=1' src/App.tsx
+grep -c cancel_countdown src-tauri/src/recorder.rs src-tauri/src/lib.rs
+grep -c defaultShapeColor src/Home.tsx src/Editor.tsx
 ```
 
 参考: 主要な機能がどのコミットで入ったかは `git log -S "<識別子>" --oneline` で特定できます。
@@ -32,8 +36,8 @@ grep -c 'countdown=1' src/App.tsx
 
 | 項目 | 状態 |
 |---|---|
-| Windows 版 1.0.0 | リリース済み（private リポジトリ、タグ `v1.0.0`、インストーラー添付済み） |
-| macOS 版 1.0.0 | **未ビルド・未検証** ← このドキュメントの作業対象 |
+| Windows 版 1.0.4 | リリース済み（タグ `v1.0.4`、NSIS インストーラーと MSI を添付済み） |
+| macOS 版 1.0.4 | **未ビルド・未検証** ← このドキュメントの作業対象（macOS 版は 1.0.0 から一度も出していない） |
 | リポジトリ公開範囲 | PRIVATE |
 | コード署名 | Windows・macOS ともに **未署名** |
 
@@ -65,6 +69,24 @@ grep -c 'countdown=1' src/App.tsx
 ### `90a36d1` リリース整備
 
 - アイコン・favicon、ライセンス本文の同梱、npm 依存の整理
+
+### v1.0.1〜v1.0.4（`v1.0.0` 以降 / since v1.0.0）
+
+`git log --oneline v1.0.0..v1.0.4` で全件を確認できます。macOS 側に影響があるもの:
+
+| バージョン | 内容 | macOS での注意 |
+|---|---|---|
+| 1.0.1 | 自動マスク（Smart Redact）を廃止、AI コード生成に On/Off トグル | 特になし |
+| 1.0.2 | 録画の動画形式に H.264/HEVC を選択可能に、WGC のモニターキャプチャへ切替 | **Windows の録画のみ**の変更。macOS は ScreenCaptureKit のまま（`video_codec` 設定は macOS では無視される） |
+| 1.0.3 | 領域選択を凍結フレーム背景に変更（[ADR 0001](./adr/0001-freeze-frame-instead-of-stealth-window.md)） | 凍結フレームの表示が macOS でも崩れないか要確認（`freeze:` スキーム） |
+| 1.0.4 | 下記 | 下記 §2-4 / §2-5 |
+
+**1.0.4 の変更**
+
+- エディタ: テキストのフォント選択（5種）、テキスト/バッジの個別サイズ変更（既定 70%）、ダブルクリックで再編集、詳細設定の開閉式化
+- 設定: エディタの既定色（図形 / テキスト背景 / 文字）— `settings.json` に `defaultShapeColor` `defaultTextBgColor` `defaultTextColor` を追加
+- 録画: 全画面でもカウントダウンを表示、カウントダウン中の Esc で中止、数字の位置補正
+- 修正: 全画面録画でメイン窓が映る問題、全画面録画後のホットキー撮影が動画扱いになる問題
 
 ---
 
@@ -127,12 +149,35 @@ ffmpeg -i ~/Pictures/AuraCap/History/auracap_YYYYMMDD_HHMMSS.mp4 -frames:v 6 /tm
 
 `skip_taskbar` は macOS では無効ですが、既存の録画枠バー窓も同じ指定なので新たな問題ではありません。
 
+### 2-4. 全画面カウントダウンと Esc 中止（1.0.4 / macOS 未検証）
+
+Fullscreen countdown and Esc-to-cancel (new in 1.0.4, unverified on macOS).
+
+- **位置**: 全画面ではプライマリモニターの中央に出します（`recorder.rs` の `primary_monitor_rect()`）。Tauri の `primary_monitor()` は物理 px で返すため、Retina で位置・大きさがずれていないか確認してください。ずれる場合は `show_countdown()` に渡す矩形のスケール変換（macOS はポイント単位）を疑う
+- **Esc**: カウントダウン中だけ `Escape` をグローバルショートカットとして登録します（窓はクリック透過・非フォーカスでキーが届かないため）。macOS で素の `Escape` が登録できるか、押して止まるかを確認する。登録に失敗するとログに `could not register Esc for countdown cancel` が出る
+- **メイン窓**: 全画面録画ではカウントダウン前にメイン窓を隠し、開始後または中止時に戻します。録画の冒頭にメイン窓が写っていないことを確認する
+- **数字の位置補正**: `App.tsx` の `inkOffset()` は `canvas.measureText` の `fontBoundingBoxAscent` を使います。macOS（WebKit）で円の中心に収まって見えるか確認する。フォントは `Segoe UI` が無いため `system-ui` にフォールバックします
+
+### 2-5. フォントのフォールバックと書き出し（1.0.4 / macOS 未検証）
+
+エディタのフォント選択は、各プリセットに Windows と macOS の両方のフォント名を並べています（`src/editor/model.ts` の `TEXT_FONTS`）。
+
+| プリセット | macOS で使われる想定 | 注意 |
+|---|---|---|
+| ゴシック | Hiragino Sans | |
+| UDゴシック | Hiragino Maru Gothic ProN | Windows の `BIZ UDPGothic` とは字形が違う（丸ゴシック） |
+| 明朝 | Hiragino Mincho ProN | |
+| 教科書体 | Hiragino Maru Gothic ProN | `UD Digi Kyokasho` は Mac に無く、**教科書体にはならない**（丸ゴシックで代用） |
+| 等幅 | Menlo | 日本語部分は `Yu Gothic UI` が無く別フォントになる |
+
+確認点: 各フォントで**画面上の見た目と書き出した画像が一致する**こと（`measureText` の実測値で吹き出しの余白を決めているため、フォントが変わっても枠からはみ出さないはず）。教科書体の代用が許容できないなら、プリセットのラベルを OS ごとに出し分けるか、Mac では非表示にする。
+
 ---
 
 ## 3. ビルド手順
 
 ```sh
-git pull origin main          # または git checkout v1.0.0
+git pull origin main          # または git checkout v1.0.4
 npm ci
 npx tsc --noEmit
 npm audit --omit=dev          # 0件になるはず
@@ -179,7 +224,9 @@ DevTools は各ウィンドウで `Cmd+Option+I`。ウィンドウごとに別�
 - [ ] 枠の中央に 3 → 2 → 1 のカウントダウンが出る
 - [ ] **録画された MP4 の冒頭に数字が写り込んでいない**
 - [ ] ウィンドウモードでも同様
-- [ ] 全画面録画（枠・カウントダウンなしで開始する。現状の仕様）
+- [ ] 全画面録画でプライマリモニター中央にカウントダウンが出る（§2-4）
+- [ ] カウントダウン中に Esc を押すと録画されずメイン窓が戻る（全画面・矩形の両方。矩形は枠も消える）
+- [ ] 全画面録画の冒頭にメイン窓・カウントダウンの数字が写っていない
 
 ### その他
 
@@ -187,6 +234,8 @@ DevTools は各ウィンドウで `Cmd+Option+I`。ウィンドウごとに別�
       ※アクセシビリティ許可が必要な場合あり
 - [ ] `~/Pictures/AuraCap/History` へ自動保存＋クリップボードコピー
 - [ ] エディタの全ツール（矩形 / 矢印 / テキスト / ハイライト / ぼかし / バッジ / トリミング）
+- [ ] テキストのフォント選択・サイズ変更・ダブルクリック再編集、バッジのサイズ変更（§2-5）
+- [ ] 設定画面の「エディタの既定色」を変えて次のキャプチャから反映される
 - [ ] コード生成（Ollama 起動時）
 - [ ] テキスト抽出が「未対応」のトーストを返し、クラッシュしない
 - [ ] トレイ（メニューバー）アイコンとメニューが機能する
@@ -214,16 +263,16 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:14820/capture 
 検証が通ったら既存のリリースに DMG を追加します。
 
 ```sh
-gh release upload v1.0.0 src-tauri/target/release/bundle/dmg/AuraCap_1.0.0_aarch64.dmg
+gh release upload v1.0.4 src-tauri/target/release/bundle/dmg/AuraCap_1.0.4_aarch64.dmg
 ```
 
 ファイル名は実際の出力に合わせてください（Apple Silicon = `aarch64`、Intel = `x64`）。
 
-**リリースノートの修正も必要です。** 現在「Windows 64bit 向けのみです」と書かれているため、macOS バイナリを追加したらその記述と SHA256 の節を更新してください。
+**リリースノートの修正も必要です。** 現在「このリリースは Windows 版のみです」と書かれているため、macOS バイナリを追加したらその記述を更新してください（SHA256 の節を設けている場合はそちらも）。
 
 ```sh
 shasum -a 256 src-tauri/target/release/bundle/dmg/*.dmg
-gh release edit v1.0.0 --notes-file <更新したノート>
+gh release edit v1.0.4 --notes-file <更新したノート>
 ```
 
 ---
@@ -272,5 +321,5 @@ CSP は `<meta>` タグではなく **HTTP レスポンスヘッダ**で配信�
 - **Mac App Store で配布できません。** オーバーレイの透明ウィンドウに `macOSPrivateApi: true` が必要なためです。Developer ID による直接配布のみ
 - **署名・公証が未対応。** Gatekeeper の警告を消すには Apple Developer Program（年 $99）の "Developer ID Application" 証明書での署名＋公証の両方が必要です。詳細と費用比較は [RELEASE.md](./RELEASE.md) の「コード署名」節
 - **動画録画は macOS 15 以降が必要。** `SCRecordingOutput`（`screencapturekit` の `macos_15_0` feature）に依存しています
-- **全画面録画にはカウントダウンが出ません。** 枠が存在しないためで、実装する場合はモニター矩形の取得に DPI 変換（macOS はポイント単位）の対応が必要です
+- **全画面録画のカウントダウン位置は macOS 未検証。** 1.0.4 で実装済み（プライマリモニター中央）。DPI 変換（macOS はポイント単位）の扱いを実機で確認すること（§2-4）
 - **テキスト抽出は Windows 専用**（WinRT OCR 依存）
