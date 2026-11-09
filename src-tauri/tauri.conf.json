@@ -43,6 +43,9 @@
       "nsis": {
         "installMode": "both"
       }
+    },
+    "macOS": {
+      "signingIdentity": "AuraCap Local Signing"
     }
   }
 }
