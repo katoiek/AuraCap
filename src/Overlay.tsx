@@ -50,7 +50,6 @@ const HANDLE_CURSOR: Record<Handle, string> = {
 // 誤クリック扱いにする最小サイズ（物理px） / Minimum size below which a drag is ignored (physical px)
 const MIN_SELECTION_PX = 4;
 
-// ルーペ（拡大鏡）の表示サイズと倍率：1pxを8px角で表示する
 // ルーペのサイズと倍率：元画像1pxを2pxのセルで表示。取得ピクセル数は必ず奇数にして
 // カーソルのピクセルをルーペの中央セルにぴったり置く（十字線が中心からずれるのを防ぐ）
 // Loupe size & zoom: each source pixel shows as a 2px cell. LOUPE_SRC must be ODD so the
@@ -58,6 +57,9 @@ const MIN_SELECTION_PX = 4;
 const LOUPE_ZOOM = 2;
 const LOUPE_SRC = 75;
 const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 150
+// 格子線（目盛り）を引く間隔（元画像のpx数）。1pxごとだと網目のように細かすぎるため5pxごと
+// Grid (tick) interval in source pixels; every 1px looked like a fine mesh, so use every 5px
+const LOUPE_GRID_STEP = 5;
 
 function clampRect(r: Rect, vw: number, vh: number): Rect {
   const left = Math.max(0, Math.min(r.left, vw - 1));
@@ -251,11 +253,17 @@ function Overlay({ monitorId }: { monitorId: number }) {
         ctx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
         ctx.drawImage(buf, 0, 0, LOUPE_SRC, LOUPE_SRC, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
 
-        // 元画像の1pxごとに薄いグリッド線を引く（拡大セルの境界を可視化） / Faint grid line per source pixel (marks each magnified cell's edge)
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+        // 元画像のLOUPE_GRID_STEP pxごとに薄い格子線を引く。カーソルのセルの左端・上端を通る線が
+        // 必ず格子線になるよう位置を合わせる（十字線もこの線に重ねる）
+        // Faint grid line every LOUPE_GRID_STEP source px, phased so a grid line always runs along
+        // the cursor cell's left/top edge (the crosshair is drawn on top of those lines)
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
         ctx.lineWidth = 1;
         ctx.beginPath();
+        const centerCell = Math.floor(LOUPE_SRC / 2);
+        const phase = centerCell;
         for (let i = 1; i < LOUPE_SRC; i++) {
+          if ((((i - phase) % LOUPE_GRID_STEP) + LOUPE_GRID_STEP) % LOUPE_GRID_STEP !== 0) continue;
           const p = i * LOUPE_ZOOM + 0.5;
           ctx.moveTo(p, 0);
           ctx.lineTo(p, LOUPE_SIZE);
@@ -264,14 +272,17 @@ function Overlay({ monitorId }: { monitorId: number }) {
         }
         ctx.stroke();
 
-        // 十字線はカーソルピクセルのセル中心を通す（backendの切り出しと同じく half=size/2）
-        // Crosshair through the center of the cursor pixel's cell (matches backend crop: half=size/2)
+        // 十字線の色と位置の基準（カーソルピクセルのセルはbackendの切り出しと同じく half=size/2）
+        // Crosshair color and anchor (the cursor pixel's cell matches backend crop: half=size/2)
         const accent =
           getComputedStyle(document.getElementById("root") ?? document.documentElement)
             .getPropertyValue("--accent")
             .trim() || "#22d3ee";
         const cellStart = Math.floor(LOUPE_SRC / 2) * LOUPE_ZOOM; // カーソルピクセルのセル左上 / top-left of cursor cell
-        const m = cellStart + LOUPE_ZOOM / 2; // セル中心＝奇数SRCならルーペ中心 / cell center (= loupe center for odd SRC)
+        // 十字線はセルの左端・上端（格子線と同じ位置）に引く。選択枠の角はピクセルの境界に置かれるため、
+        // セル中心ではなく境界に合わせるのが正しい / The crosshair sits on the cell's left/top edge (same
+        // spot as the grid lines): selection corners land on pixel boundaries, not pixel centers
+        const m = cellStart + 0.5;
         ctx.strokeStyle = `${accent}8c`;
         ctx.lineWidth = 1;
         ctx.beginPath();
