@@ -55,8 +55,12 @@ const MIN_SELECTION_PX = 4;
 // Loupe size & zoom: each source pixel shows as a 2px cell. LOUPE_SRC must be ODD so the
 // cursor pixel lands exactly in the center cell (keeps the crosshair dead-center).
 const LOUPE_ZOOM = 2;
-const LOUPE_SRC = 75;
-const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 150
+const LOUPE_SRC = 91;
+const LOUPE_SIZE = LOUPE_SRC * LOUPE_ZOOM; // 182（旧・円の直径150の約1.2倍 / ~1.2x the old 150px circle）
+// 枠線の太さ。canvasがぴったり収まるよう、枠は外側に足す（content-box）
+// Border width; added outside the canvas (content-box) so the canvas fits exactly
+const LOUPE_BORDER = 2;
+const LOUPE_BOX = LOUPE_SIZE + LOUPE_BORDER * 2; // 枠込みの外形 / outer size incl. border
 // 格子線（目盛り）を引く間隔（元画像のpx数）。1pxごとだと網目のように細かすぎるため5pxごと
 // Grid (tick) interval in source pixels; every 1px looked like a fine mesh, so use every 5px
 const LOUPE_GRID_STEP = 5;
@@ -607,18 +611,24 @@ function Overlay({ monitorId }: { monitorId: number }) {
           style={{
             // デフォルトはカーソルの左下。画面端では右・上へ回り込む
             // Defaults to the cursor's lower-left; flips right/up near screen edges
-            left: cursor.x - 24 - LOUPE_SIZE < 0 ? cursor.x + 24 : cursor.x - 24 - LOUPE_SIZE,
+            left: cursor.x - 24 - LOUPE_BOX < 0 ? cursor.x + 24 : cursor.x - 24 - LOUPE_BOX,
             top:
-              cursor.y + 24 + LOUPE_SIZE + 28 > window.innerHeight
-                ? cursor.y - 24 - LOUPE_SIZE - 28
+              cursor.y + 24 + LOUPE_BOX + 28 > window.innerHeight
+                ? cursor.y - 24 - LOUPE_BOX - 28
                 : cursor.y + 24,
           }}
         >
-          {/* TechSmith Capture風に円形。クリップは外側divのoverflow-hiddenで行う（canvas自体は正方形のまま） */}
-          {/* Circular like TechSmith Capture; clipping comes from the outer div's overflow-hidden (canvas itself stays square) */}
+          {/* 角丸の四角形。角のクリップは外側divのoverflow-hiddenで行う（canvas自体は正方形のまま） */}
+          {/* Rounded square; corner clipping comes from the outer div's overflow-hidden (canvas itself stays square) */}
           <div
-            className="overflow-hidden rounded-full border-2 border-[var(--accent)] shadow-lg"
-            style={{ width: LOUPE_SIZE, height: LOUPE_SIZE }}
+            className="overflow-hidden rounded-xl border-[var(--accent)] shadow-lg"
+            style={{
+              boxSizing: "content-box",
+              width: LOUPE_SIZE,
+              height: LOUPE_SIZE,
+              borderWidth: LOUPE_BORDER,
+              borderStyle: "solid",
+            }}
           >
             <canvas ref={loupeRef} width={LOUPE_SIZE} height={LOUPE_SIZE} className="block" />
           </div>
