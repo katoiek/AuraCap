@@ -261,20 +261,32 @@ function Overlay({ monitorId }: { monitorId: number }) {
         // 必ず格子線になるよう位置を合わせる（十字線もこの線に重ねる）
         // Faint grid line every LOUPE_GRID_STEP source px, phased so a grid line always runs along
         // the cursor cell's left/top edge (the crosshair is drawn on top of those lines)
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
+        // 白背景でも暗い背景でも見えるよう、境界の右/下に黒、左/上に白の1px線を並べた2色線にする
+        // Two-tone line (black on the right/bottom of the boundary, white on the left/top) so it stays
+        // visible on both light and dark backgrounds
         const centerCell = Math.floor(LOUPE_SRC / 2);
         const phase = centerCell;
+        const gridPos: number[] = [];
         for (let i = 1; i < LOUPE_SRC; i++) {
-          if ((((i - phase) % LOUPE_GRID_STEP) + LOUPE_GRID_STEP) % LOUPE_GRID_STEP !== 0) continue;
-          const p = i * LOUPE_ZOOM + 0.5;
-          ctx.moveTo(p, 0);
-          ctx.lineTo(p, LOUPE_SIZE);
-          ctx.moveTo(0, p);
-          ctx.lineTo(LOUPE_SIZE, p);
+          if ((((i - phase) % LOUPE_GRID_STEP) + LOUPE_GRID_STEP) % LOUPE_GRID_STEP === 0) {
+            gridPos.push(i * LOUPE_ZOOM);
+          }
         }
-        ctx.stroke();
+        const strokeGrid = (style: string, offset: number) => {
+          ctx.strokeStyle = style;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (const g of gridPos) {
+            const p = g + offset + 0.5;
+            ctx.moveTo(p, 0);
+            ctx.lineTo(p, LOUPE_SIZE);
+            ctx.moveTo(0, p);
+            ctx.lineTo(LOUPE_SIZE, p);
+          }
+          ctx.stroke();
+        };
+        strokeGrid("rgba(0, 0, 0, 0.45)", 0);
+        strokeGrid("rgba(255, 255, 255, 0.45)", -1);
 
         // 十字線の色と位置の基準（カーソルピクセルのセルはbackendの切り出しと同じく half=size/2）
         // Crosshair color and anchor (the cursor pixel's cell matches backend crop: half=size/2)
