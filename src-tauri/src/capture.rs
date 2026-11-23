@@ -579,11 +579,12 @@ fn list_desktop_windows() -> Vec<DesktopWindow> {
     use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Dwm::{
         DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+        DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible,
+        GetWindowThreadProcessId, IsWindowVisible, IsZoomed,
     };
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -644,6 +645,28 @@ fn list_desktop_windows() -> Vec<DesktopWindow> {
             {
                 continue;
             }
+            // Windows 11 は境界の内側1px（拡大率により増える）にDWMの枠線を描き、半透明で背景が透ける。
+            // 撮影結果の外周に線が残らないよう、その太さ分だけ内側へ縮める。最大化中は枠線が描かれず、
+            // Windows 10 などで取得できないときは縮めない（0）。
+            // Windows 11 draws its DWM border over the outermost 1px (more at higher DPI) of these
+            // bounds, semi-transparently, so the background shows through. Inset by that thickness so
+            // the capture has no outline. No inset when maximized (no border drawn) or when the
+            // attribute is unavailable (e.g. Windows 10).
+            let mut border: u32 = 0;
+            if !IsZoomed(hwnd).as_bool() {
+                let _ = DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+                    &mut border as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<u32>() as u32,
+                );
+            }
+            // 異常値で窓が消えないよう上限を設ける / Cap it so a bogus value can't swallow the window
+            let inset = border.min(8) as i32;
+            rect.left += inset;
+            rect.top += inset;
+            rect.right -= inset;
+            rect.bottom -= inset;
             let width = (rect.right - rect.left).max(0) as u32;
             let height = (rect.bottom - rect.top).max(0) as u32;
             if width < 8 || height < 8 {
